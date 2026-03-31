@@ -1,25 +1,16 @@
 import streamlit as st
 import matplotlib.pyplot as plt
+import re
 
-# Configuração visual do site
-st.set_page_config(page_title="Analisador de Experimentos", layout="wide")
+st.set_page_config(page_title="Analisador de Pastas", layout="wide")
 
-st.title("🔬 Painel de Análise de Experimentos")
-st.markdown("---")
+st.title("🔬 Analisador de Experimentos (Pasta Completa)")
+st.markdown("Selecione todos os arquivos .txt da sua pasta de uma vez.")
 
-st.sidebar.header("Instruções")
-st.sidebar.info("1. Selecione o arquivo X (ímpar)\n2. Selecione o arquivo Y (par)\n3. O gráfico aparecerá automaticamente.")
-
-# Área de Upload
-col1, col2 = st.columns(2)
-
-with col1:
-    file_x = st.file_uploader("📤 Arquivo Canal X (ex: 11.txt)", type="txt")
-with col2:
-    file_y = st.file_uploader("📤 Arquivo Canal Y (ex: 12.txt)", type="txt")
+# Botão de upload que aceita múltiplos arquivos
+uploaded_files = st.file_uploader("📤 Arraste todos os arquivos .txt aqui", type="txt", accept_multiple_files=True)
 
 def ler_dados_txt(file):
-    if file is None: return []
     valores = []
     lendo = False
     conteudo = file.getvalue().decode("utf-8")
@@ -32,44 +23,54 @@ def ler_dados_txt(file):
             except: pass
     return valores
 
-if file_x and file_y:
-    with st.spinner('Processando dados e removendo duplicatas...'):
-        xs = ler_dados_txt(file_x)
-        ys = ler_dados_txt(file_y)
-        
-        n = min(len(xs), len(ys))
-        if n > 0:
-            # Filtro de pontos repetidos (Removendo ruído)
-            pontos = list(dict.fromkeys(zip(xs[:n], ys[:n])))
-            xs_f, ys_f = zip(*pontos)
+if uploaded_files:
+    # Organizar os arquivos em um dicionário pelo nome
+    arquivos_dict = {f.name: f for f in uploaded_files}
+    nomes = sorted(arquivos_dict.keys())
+    
+    # Encontrar os pares (Ímpar x Par)
+    pares = []
+    for nome in nomes:
+        numero_match = re.search(r'(\d+)', nome)
+        if numero_match:
+            num = int(numero_match.group(1))
+            if num % 2 != 0: # Se for ímpar (X)
+                par_nome = nome.replace(str(num), str(num + 1))
+                if par_nome in arquivos_dict:
+                    pares.append((nome, par_nome))
 
-            st.subheader(f"📊 Resultado: {file_x.name} vs {file_y.name}")
+    if pares:
+        st.sidebar.header("📊 Seleção de Gráfico")
+        escolha = st.sidebar.selectbox("Escolha o par para visualizar:", [f"{p[0]} x {p[1]}" for p in pares])
+        
+        if escolha:
+            arq_x_nome, arq_y_nome = escolha.split(" x ")
             
-            fig, ax = plt.subplots(figsize=(12, 5))
-            ax.plot(xs_f, ys_f, color='#1f77b4', linewidth=1.5, label="Curva de Experimento")
-            ax.set_xlabel("Canal X (mV)")
-            ax.set_ylabel("Canal Y (mV)")
-            ax.grid(True, linestyle='--', alpha=0.5)
-            ax.legend()
-            
-            st.pyplot(fig)
-            
-            # Estatísticas rápidas
-            st.success(f"Análise concluída! {len(xs_f)} pontos únicos processados.")
-            
-            # Botão de Download do Gráfico
-            plt.savefig("resultado.png", dpi=300)
-            with open("resultado.png", "rb") as img:
-                st.download_button(
-                    label="💾 Baixar Gráfico (PNG)",
-                    data=img,
-                    file_name=f"grafico_{file_x.name}.png",
-                    mime="image/png"
-                )
-        else:
-            st.error("Erro: Os arquivos não contêm dados válidos entre [DATA] e [ENDDATA].")
+            with st.spinner(f'Gerando gráfico de {escolha}...'):
+                xs = ler_dados_txt(arquivos_dict[arq_x_nome])
+                ys = ler_dados_txt(arquivos_dict[arq_y_nome])
+                
+                n = min(len(xs), len(ys))
+                if n > 0:
+                    # Filtro de duplicatas
+                    pontos = list(dict.fromkeys(zip(xs[:n], ys[:n])))
+                    xs_f, ys_f = zip(*pontos)
+
+                    st.subheader(f"📈 Gráfico: {escolha}")
+                    fig, ax = plt.subplots(figsize=(12, 5))
+                    ax.plot(xs_f, ys_f, color='#1f77b4', linewidth=1.5)
+                    ax.set_xlabel("Canal X (mV)")
+                    ax.set_ylabel("Canal Y (mV)")
+                    ax.grid(True, alpha=0.3)
+                    st.pyplot(fig)
+                    
+                    st.success(f"Exibindo {len(xs_f)} pontos únicos.")
+                else:
+                    st.error("Dados inválidos nos arquivos selecionados.")
+    else:
+        st.warning("Nenhum par de arquivos (Ímpar/Par) foi identificado. Verifique os nomes dos arquivos.")
 else:
-    st.info("Aguardando o upload dos arquivos para iniciar a análise...")
+    st.info("💡 Dica: Entre na sua pasta de experimentos, aperte 'Ctrl + A' para selecionar todos os arquivos e arraste para cá.")
 
 st.markdown("---")
-st.caption("Plataforma de análise rápida desenvolvida para laboratórios.")
+st.caption("Análise em lote via navegador.")
