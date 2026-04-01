@@ -1,108 +1,141 @@
 import streamlit as st
 import matplotlib.pyplot as plt
 import re
+from collections import defaultdict
 
 st.set_page_config(page_title="Analisador de Experimentos", layout="wide")
 
 st.title("🔬 Analisador de Experimentos")
 st.markdown("---")
 
-# Upload de MÚLTIPLAS PASTAS (sem limite)
-st.subheader("📂 Passo 1: Suba os arquivos das suas pastas")
-st.info("Você pode selecionar arquivos de várias pastas ao mesmo tempo! Segure Ctrl e clique em cada pasta para selecionar todas.")
-
+st.subheader("📂 Upload dos arquivos")
 uploaded_files = st.file_uploader(
-    "Arraste ou selecione TODOS os arquivos .txt aqui (de todas as pastas)",
+    "Selecione todos os arquivos .txt",
     type="txt",
-    accept_multiple_files=True,
-    help="Dica: Abra cada pasta, aperte Ctrl+A e arraste para cá. Repita para cada pasta."
+    accept_multiple_files=True
 )
 
 def ler_dados_txt(file):
     valores = []
     lendo = False
-    conteudo = file.getvalue().decode("utf-8")
+    conteudo = file.getvalue().decode("utf-8", errors="ignore")
     for linha in conteudo.splitlines():
         linha = linha.strip()
-        if linha == "[DATA]": lendo = True
-        elif linha == "[ENDDATA]": break
-        elif lendo and linha:
-            try: valores.append(float(linha))
-            except: pass
+        if linha == "[DATA]":
+            lendo = True
+            continue
+        if linha == "[ENDDATA]":
+            break
+        if lendo and linha:
+            try:
+                valores.append(float(linha))
+            except:
+                pass
     return valores
 
+def extrair_numero_base(nome):
+    """
+    Pega o número do arquivo.
+    Ex:
+    11.txt -> 11
+    12.txt -> 12
+    """
+    m = re.fullmatch(r"(\d+)\.txt", nome.strip(), re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
+
 if uploaded_files:
-    st.success(f"✅ {len(uploaded_files)} arquivos carregados com sucesso!")
-    
-    # Organizar arquivos
-    arquivos_dict = {f.name: f for f in uploaded_files}
-    nomes = sorted(arquivos_dict.keys())
-    
-    # Encontrar pares automaticamente
+    st.success(f"✅ {len(uploaded_files)} arquivos carregados")
+
+    # Evita conflito de nomes repetidos
+    arquivos_por_nome = {}
+    nomes_repetidos = []
+
+    for f in uploaded_files:
+        if f.name in arquivos_por_nome:
+            nomes_repetidos.append(f.name)
+        arquivos_por_nome[f.name] = f
+
+    if nomes_repetidos:
+        st.warning("⚠️ Existem arquivos com nomes repetidos. Alguns podem ter sido sobrescritos:")
+        st.write(sorted(set(nomes_repetidos)))
+
+    # Separar arquivos válidos
+    numeros_disponiveis = {}
+    arquivos_invalidos = []
+
+    for nome, f in arquivos_por_nome.items():
+        numero = extrair_numero_base(nome)
+        if numero is None:
+            arquivos_invalidos.append(nome)
+        else:
+            numeros_disponiveis[numero] = f
+
+    # Encontrar pares: ímpar -> próximo par
     pares = []
-    for nome in nomes:
-        numero_match = re.search(r'(\d+)', nome)
-        if numero_match:
-            num = int(numero_match.group(1))
-            if num % 2 != 0:
-                par_nome = nome.replace(str(num), str(num + 1))
-                if par_nome in arquivos_dict:
-                    pares.append((nome, par_nome))
-    
+    arquivos_sem_par = []
+
+    for numero in sorted(numeros_disponiveis.keys()):
+        if numero % 2 != 0:  # ímpar
+            if (numero + 1) in numeros_disponiveis:
+                pares.append((numero, numero + 1))
+            else:
+                arquivos_sem_par.append(f"{numero}.txt")
+
+    st.info(f"📌 Pares encontrados: {len(pares)}")
+    st.info(f"📌 Arquivos válidos identificados: {len(numeros_disponiveis)}")
+
+    with st.expander("Ver diagnóstico dos arquivos"):
+        st.write("**Arquivos válidos identificados:**")
+        st.write(sorted([f"{n}.txt" for n in numeros_disponiveis.keys()]))
+
+        if arquivos_invalidos:
+            st.write("**Arquivos ignorados por nome inválido:**")
+            st.write(sorted(arquivos_invalidos))
+
+        if arquivos_sem_par:
+            st.write("**Arquivos sem par correspondente:**")
+            st.write(sorted(arquivos_sem_par))
+
     if pares:
         st.markdown("---")
-        st.subheader("📊 Passo 2: Escolha o gráfico que quer ver")
-        
-        # BOTÕES para cada par (resolve problema 1)
-        cols = st.columns(min(len(pares), 4))
-        
-        if "par_selecionado" not in st.session_state:
-            st.session_state.par_selecionado = f"{pares[0][0]} x {pares[0][1]}"
-        
-        for i, (px, py) in enumerate(pares):
-            with cols[i % 4]:
-                label = f"{px}\n x\n{py}"
-                if st.button(f"📈 {px} x {py}", key=f"btn_{i}", use_container_width=True):
-                    st.session_state.par_selecionado = f"{px} x {py}"
-        
-        st.markdown("---")
-        
-        # Gerar gráfico do par selecionado
-        escolha = st.session_state.par_selecionado
-        arq_x_nome, arq_y_nome = escolha.split(" x ")
-        
-        with st.spinner(f'Gerando gráfico: {escolha}...'):
-            xs = ler_dados_txt(arquivos_dict[arq_x_nome])
-            ys = ler_dados_txt(arquivos_dict[arq_y_nome])
-            
-            n = min(len(xs), len(ys))
-            if n > 0:
-                pontos = list(dict.fromkeys(zip(xs[:n], ys[:n])))
+        st.subheader("📊 Escolha o gráfico")
+
+        opcoes = [f"{x}.txt x {y}.txt" for x, y in pares]
+        escolha = st.selectbox("Selecione um par:", opcoes)
+
+        arq_x_num = int(escolha.split(".txt x ")[0])
+        arq_y_num = int(escolha.split(" x ")[1].replace(".txt", ""))
+
+        file_x = numeros_disponiveis[arq_x_num]
+        file_y = numeros_disponiveis[arq_y_num]
+
+        xs = ler_dados_txt(file_x)
+        ys = ler_dados_txt(file_y)
+
+        n = min(len(xs), len(ys))
+
+        if n > 0:
+            pontos = list(dict.fromkeys(zip(xs[:n], ys[:n])))
+
+            if pontos:
                 xs_f, ys_f = zip(*pontos)
-                
-                st.subheader(f"📈 Gráfico: {escolha}")
+
+                st.subheader(f"📈 Gráfico: {arq_x_num}.txt x {arq_y_num}.txt")
                 fig, ax = plt.subplots(figsize=(12, 5))
-                ax.plot(xs_f, ys_f, color='#1f77b4', linewidth=1.5)
+                ax.plot(xs_f, ys_f, color="#1f77b4", linewidth=1.5)
                 ax.set_xlabel("Canal X (mV)")
                 ax.set_ylabel("Canal Y (mV)")
                 ax.grid(True, alpha=0.3)
                 st.pyplot(fig)
-                
-                st.success(f"Exibindo {len(xs_f)} pontos únicos.")
-                
-                # Botão de download
-                plt.savefig("resultado.png", dpi=300, bbox_inches='tight')
-                with open("resultado.png", "rb") as img:
-                    st.download_button(
-                        label="💾 Baixar Gráfico (PNG)",
-                        data=img,
-                        file_name=f"grafico_{escolha}.png",
-                        mime="image/png"
-                    )
-    else:
-        st.warning("⚠️ Nenhum par encontrado. Verifique se os arquivos seguem o padrão (ex: 11.txt e 12.txt).")
-else:
-    st.info("👆 Suba os arquivos acima para começar.")
 
-st.markdown("---")
-st.caption("Plataforma de análise de experimentos de laboratório.")
+                st.success(f"Exibindo {len(xs_f)} pontos únicos.")
+            else:
+                st.warning("Não há pontos válidos após remover duplicatas.")
+        else:
+            st.error("Os arquivos selecionados não possuem dados válidos.")
+    else:
+        st.warning("Nenhum par ímpar/par foi encontrado.")
+else:
+    st.info("Envie os arquivos .txt para começar.")
