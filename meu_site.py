@@ -2,13 +2,21 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import re
 
-st.set_page_config(page_title="Analisador de Pastas", layout="wide")
+st.set_page_config(page_title="Analisador de Experimentos", layout="wide")
 
-st.title("🔬 Analisador de Experimentos (Pasta Completa)")
-st.markdown("Selecione todos os arquivos .txt da sua pasta de uma vez.")
+st.title("🔬 Analisador de Experimentos")
+st.markdown("---")
 
-# Botão de upload que aceita múltiplos arquivos
-uploaded_files = st.file_uploader("📤 Arraste todos os arquivos .txt aqui", type="txt", accept_multiple_files=True)
+# Upload de MÚLTIPLAS PASTAS (sem limite)
+st.subheader("📂 Passo 1: Suba os arquivos das suas pastas")
+st.info("Você pode selecionar arquivos de várias pastas ao mesmo tempo! Segure Ctrl e clique em cada pasta para selecionar todas.")
+
+uploaded_files = st.file_uploader(
+    "Arraste ou selecione TODOS os arquivos .txt aqui (de todas as pastas)",
+    type="txt",
+    accept_multiple_files=True,
+    help="Dica: Abra cada pasta, aperte Ctrl+A e arraste para cá. Repita para cada pasta."
+)
 
 def ler_dados_txt(file):
     valores = []
@@ -24,53 +32,77 @@ def ler_dados_txt(file):
     return valores
 
 if uploaded_files:
-    # Organizar os arquivos em um dicionário pelo nome
+    st.success(f"✅ {len(uploaded_files)} arquivos carregados com sucesso!")
+    
+    # Organizar arquivos
     arquivos_dict = {f.name: f for f in uploaded_files}
     nomes = sorted(arquivos_dict.keys())
     
-    # Encontrar os pares (Ímpar x Par)
+    # Encontrar pares automaticamente
     pares = []
     for nome in nomes:
         numero_match = re.search(r'(\d+)', nome)
         if numero_match:
             num = int(numero_match.group(1))
-            if num % 2 != 0: # Se for ímpar (X)
+            if num % 2 != 0:
                 par_nome = nome.replace(str(num), str(num + 1))
                 if par_nome in arquivos_dict:
                     pares.append((nome, par_nome))
-
+    
     if pares:
-        st.sidebar.header("📊 Seleção de Gráfico")
-        escolha = st.sidebar.selectbox("Escolha o par para visualizar:", [f"{p[0]} x {p[1]}" for p in pares])
+        st.markdown("---")
+        st.subheader("📊 Passo 2: Escolha o gráfico que quer ver")
         
-        if escolha:
-            arq_x_nome, arq_y_nome = escolha.split(" x ")
+        # BOTÕES para cada par (resolve problema 1)
+        cols = st.columns(min(len(pares), 4))
+        
+        if "par_selecionado" not in st.session_state:
+            st.session_state.par_selecionado = f"{pares[0][0]} x {pares[0][1]}"
+        
+        for i, (px, py) in enumerate(pares):
+            with cols[i % 4]:
+                label = f"{px}\n x\n{py}"
+                if st.button(f"📈 {px} x {py}", key=f"btn_{i}", use_container_width=True):
+                    st.session_state.par_selecionado = f"{px} x {py}"
+        
+        st.markdown("---")
+        
+        # Gerar gráfico do par selecionado
+        escolha = st.session_state.par_selecionado
+        arq_x_nome, arq_y_nome = escolha.split(" x ")
+        
+        with st.spinner(f'Gerando gráfico: {escolha}...'):
+            xs = ler_dados_txt(arquivos_dict[arq_x_nome])
+            ys = ler_dados_txt(arquivos_dict[arq_y_nome])
             
-            with st.spinner(f'Gerando gráfico de {escolha}...'):
-                xs = ler_dados_txt(arquivos_dict[arq_x_nome])
-                ys = ler_dados_txt(arquivos_dict[arq_y_nome])
+            n = min(len(xs), len(ys))
+            if n > 0:
+                pontos = list(dict.fromkeys(zip(xs[:n], ys[:n])))
+                xs_f, ys_f = zip(*pontos)
                 
-                n = min(len(xs), len(ys))
-                if n > 0:
-                    # Filtro de duplicatas
-                    pontos = list(dict.fromkeys(zip(xs[:n], ys[:n])))
-                    xs_f, ys_f = zip(*pontos)
-
-                    st.subheader(f"📈 Gráfico: {escolha}")
-                    fig, ax = plt.subplots(figsize=(12, 5))
-                    ax.plot(xs_f, ys_f, color='#1f77b4', linewidth=1.5)
-                    ax.set_xlabel("Canal X (mV)")
-                    ax.set_ylabel("Canal Y (mV)")
-                    ax.grid(True, alpha=0.3)
-                    st.pyplot(fig)
-                    
-                    st.success(f"Exibindo {len(xs_f)} pontos únicos.")
-                else:
-                    st.error("Dados inválidos nos arquivos selecionados.")
+                st.subheader(f"📈 Gráfico: {escolha}")
+                fig, ax = plt.subplots(figsize=(12, 5))
+                ax.plot(xs_f, ys_f, color='#1f77b4', linewidth=1.5)
+                ax.set_xlabel("Canal X (mV)")
+                ax.set_ylabel("Canal Y (mV)")
+                ax.grid(True, alpha=0.3)
+                st.pyplot(fig)
+                
+                st.success(f"Exibindo {len(xs_f)} pontos únicos.")
+                
+                # Botão de download
+                plt.savefig("resultado.png", dpi=300, bbox_inches='tight')
+                with open("resultado.png", "rb") as img:
+                    st.download_button(
+                        label="💾 Baixar Gráfico (PNG)",
+                        data=img,
+                        file_name=f"grafico_{escolha}.png",
+                        mime="image/png"
+                    )
     else:
-        st.warning("Nenhum par de arquivos (Ímpar/Par) foi identificado. Verifique os nomes dos arquivos.")
+        st.warning("⚠️ Nenhum par encontrado. Verifique se os arquivos seguem o padrão (ex: 11.txt e 12.txt).")
 else:
-    st.info("💡 Dica: Entre na sua pasta de experimentos, aperte 'Ctrl + A' para selecionar todos os arquivos e arraste para cá.")
+    st.info("👆 Suba os arquivos acima para começar.")
 
 st.markdown("---")
-st.caption("Análise em lote via navegador.")
+st.caption("Plataforma de análise de experimentos de laboratório.")
