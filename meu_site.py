@@ -1,119 +1,97 @@
-import streamlit as st
+import numpy as np
 import matplotlib.pyplot as plt
-import re
-import zipfile
-import io
 
-st.set_page_config(page_title="Analisador de Experimentos", layout="wide")
-st.title("🔬 Analisador de Experimentos")
-st.markdown("---")
-
-st.subheader("📂 Upload da Pasta (ZIP)")
-st.info("Compacte sua pasta de experimentos em ZIP e suba aqui. Sem limite de arquivos!")
-
-uploaded_zip = st.file_uploader("📤 Suba o arquivo .zip da pasta", type="zip")
-
-def ler_dados_bytes(conteudo_bytes):
-    valores = []
+def ler_txt_vallen(nome_arquivo):
+    sample_rate = None
+    dados = []
     lendo = False
-    for linha in conteudo_bytes.decode("utf-8", errors="ignore").splitlines():
-        linha = linha.strip()
-        if linha == "[DATA]":
-            lendo = True
-            continue
-        if linha == "[ENDDATA]":
-            break
-        if lendo and linha:
-            try:
-                valores.append(float(linha))
-            except:
-                pass
-    return valores
 
-if uploaded_zip:
-    with zipfile.ZipFile(io.BytesIO(uploaded_zip.read())) as z:
-        # Listar todos os .txt dentro do ZIP
-        todos_arquivos = [f for f in z.namelist() if f.endswith(".txt")]
-        
-        st.success(f"✅ {len(todos_arquivos)} arquivos .txt encontrados no ZIP!")
+    with open(nome_arquivo, "r", encoding="utf-8") as f:
+        for linha in f:
+            linha = linha.strip()
 
-        # Organizar por número
-        numeros_disponiveis = {}
-        arquivos_invalidos = []
+            if linha.startswith("SampleRate[Hz]:"):
+                sample_rate = float(linha.split(":")[1].strip())
 
-        for caminho in todos_arquivos:
-            nome = caminho.split("/")[-1]  # pega só o nome do arquivo
-            m = re.fullmatch(r"(\d+)\.txt", nome.strip(), re.IGNORECASE)
-            if m:
-                numero = int(m.group(1))
-                numeros_disponiveis[numero] = caminho
-            else:
-                arquivos_invalidos.append(nome)
+            elif linha == "[DATA]":
+                lendo = True
+                continue
 
-        # Encontrar pares
-        pares = []
-        sem_par = []
+            elif linha == "[ENDDATA]":
+                break
 
-        for numero in sorted(numeros_disponiveis.keys()):
-            if numero % 2 != 0:
-                if (numero + 1) in numeros_disponiveis:
-                    pares.append((numero, numero + 1))
-                else:
-                    sem_par.append(f"{numero}.txt")
+            elif lendo and linha:
+                try:
+                    dados.append(float(linha))
+                except:
+                    pass
 
-        st.info(f"📌 {len(pares)} pares encontrados")
+    return sample_rate, np.array(dados)
 
-        with st.expander("🔍 Ver diagnóstico"):
-            st.write("**Arquivos válidos:**", sorted([f"{n}.txt" for n in numeros_disponiveis.keys()]))
-            if arquivos_invalidos:
-                st.write("**Ignorados:**", sorted(arquivos_invalidos))
-            if sem_par:
-                st.write("**Sem par:**", sorted(sem_par))
+# Ler os dois canais
+fs1, x = ler_txt_vallen("11.txt")
+fs2, y = ler_txt_vallen("12.txt")
 
-        if pares:
-            st.markdown("---")
-            st.subheader("📊 Escolha o gráfico")
+# usar a mesma taxa
+fs = fs1
 
-            opcoes = [f"{x}.txt x {y}.txt" for x, y in pares]
-            escolha = st.selectbox("Selecione um par:", opcoes)
+# remover média
+x = x - np.mean(x)
+y = y - np.mean(y)
 
-            arq_x_num = int(escolha.split(".txt")[0])
-            arq_y_num = arq_x_num + 1
+# janela de Hanning
+janela_x = np.hanning(len(x))
+janela_y = np.hanning(len(y))
 
-            with z.open(numeros_disponiveis[arq_x_num]) as fx:
-                xs = ler_dados_bytes(fx.read())
-            with z.open(numeros_disponiveis[arq_y_num]) as fy:
-                ys = ler_dados_bytes(fy.read())
+xw = x * janela_x
+yw = y * janela_y
 
-            n = min(len(xs), len(ys))
+# FFT
+X = np.fft.rfft(xw)
+Y = np.fft.rfft(yw)
 
-            if n > 0:
-                pontos = list(dict.fromkeys(zip(xs[:n], ys[:n])))
-                if pontos:
-                    xs_f, ys_f = zip(*pontos)
+freq_x = np.fft.rfftfreq(len(xw), d=1/fs)
+freq_y = np.fft.rfftfreq(len(yw), d=1/fs)
 
-                    st.subheader(f"📈 {escolha}")
-                    fig, ax = plt.subplots(figsize=(12, 5))
-                    ax.plot(xs_f, ys_f, color="#1f77b4", linewidth=1.5)
-                    ax.set_xlabel("Canal X (mV)")
-                    ax.set_ylabel("Canal Y (mV)")
-                    ax.grid(True, alpha=0.3)
-                    st.pyplot(fig)
+amp_x = np.abs(X)
+amp_y = np.abs(Y)
 
-                    st.success(f"✅ {len(xs_f)} pontos únicos exibidos.")
+# gráfico no tempo
+fig, axs = plt.subplots(2, 2, figsize=(14, 8))
 
-                    plt.savefig("resultado.png", dpi=300, bbox_inches="tight")
-                    with open("resultado.png", "rb") as img:
-                        st.download_button(
-                            label="💾 Baixar Gráfico (PNG)",
-                            data=img,
-                            file_name=f"grafico_{escolha}.png",
-                            mime="image/png"
-                        )
-        else:
-            st.warning("Nenhum par encontrado no ZIP.")
-else:
-    st.info("👆 Suba o arquivo ZIP para começar.")
+axs[0, 0].plot(x, color="blue")
+axs[0, 0].set_title("Canal 1 no tempo")
+axs[0, 0].set_xlabel("Amostra")
+axs[0, 0].set_ylabel("Amplitude (mV)")
+axs[0, 0].grid(True)
 
-st.markdown("---")
-st.caption("Plataforma de análise de experimentos de laboratório.")
+axs[0, 1].plot(y, color="green")
+axs[0, 1].set_title("Canal 2 no tempo")
+axs[0, 1].set_xlabel("Amostra")
+axs[0, 1].set_ylabel("Amplitude (mV)")
+axs[0, 1].grid(True)
+
+# gráfico FFT
+axs[1, 0].plot(freq_x, amp_x, color="blue")
+axs[1, 0].set_title("FFT - Canal 1")
+axs[1, 0].set_xlabel("Frequência (Hz)")
+axs[1, 0].set_ylabel("Amplitude")
+axs[1, 0].grid(True)
+axs[1, 0].set_xlim(0, fs/2)
+
+axs[1, 1].plot(freq_y, amp_y, color="green")
+axs[1, 1].set_title("FFT - Canal 2")
+axs[1, 1].set_xlabel("Frequência (Hz)")
+axs[1, 1].set_ylabel("Amplitude")
+axs[1, 1].grid(True)
+axs[1, 1].set_xlim(0, fs/2)
+
+plt.tight_layout()
+plt.show()
+
+# frequência dominante
+pico_x = freq_x[np.argmax(amp_x[1:]) + 1]
+pico_y = freq_y[np.argmax(amp_y[1:]) + 1]
+
+print(f"Frequência dominante Canal 1: {pico_x:.2f} Hz")
+print(f"Frequência dominante Canal 2: {pico_y:.2f} Hz")
