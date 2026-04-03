@@ -1,103 +1,87 @@
 import streamlit as st
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="FFT dos sinais", layout="wide")
-st.title("Análise FFT de arquivos .txt")
+st.set_page_config(page_title="Análise de Experimentos", layout="wide")
+st.title("📊 Visualizador de Experimentos")
 
-def ler_txt_vallen_arquivo(arquivo):
+# --- CONFIGURAÇÃO DE CAMINHO ---
+# Ajuste para o nome da pasta que você subiu no GitHub
+PASTA_RAIZ = "experimentos" 
+
+def ler_txt_vallen(caminho_arquivo):
+    if not os.path.exists(caminho_arquivo):
+        return None, None
+    
     sample_rate = None
     dados = []
     lendo = False
 
-    conteudo = arquivo.read().decode("utf-8", errors="ignore").splitlines()
-
-    for linha in conteudo:
-        linha = linha.strip()
-
-        if linha.startswith("SampleRate[Hz]:"):
-            sample_rate = float(linha.split(":")[1].strip())
-
-        elif linha == "[DATA]":
-            lendo = True
-            continue
-
-        elif linha == "[ENDDATA]":
-            break
-
-        elif lendo and linha:
-            try:
-                dados.append(float(linha))
-            except:
-                pass
-
+    with open(caminho_arquivo, "r", encoding="utf-8", errors="ignore") as f:
+        for linha in f:
+            linha = linha.strip()
+            if linha.startswith("SampleRate[Hz]:"):
+                sample_rate = float(linha.split(":")[1].strip())
+            elif linha == "[DATA]":
+                lendo = True
+                continue
+            elif linha == "[ENDDATA]":
+                break
+            elif lendo and linha:
+                try:
+                    dados.append(float(linha))
+                except:
+                    pass
     return sample_rate, np.array(dados)
 
-arquivo_x = st.file_uploader("Envie o arquivo do Canal 1 (ex: 11.txt)", type=["txt"])
-arquivo_y = st.file_uploader("Envie o arquivo do Canal 2 (ex: 12.txt)", type=["txt"])
+# 1. Verificar se a pasta existe
+if not os.path.exists(PASTA_RAIZ):
+    st.error(f"A pasta '{PASTA_RAIZ}' não foi encontrada no repositório. Verifique o nome no GitHub.")
+else:
+    # 2. Selecionar a Subpasta (Experimento)
+    subpastas = [f for f in os.listdir(PASTA_RAIZ) if os.path.isdir(os.path.join(PASTA_RAIZ, f))]
+    experimento_sel = st.sidebar.selectbox("Escolha o Experimento:", subpastas)
 
-if arquivo_x is not None and arquivo_y is not None:
-    fs1, x = ler_txt_vallen_arquivo(arquivo_x)
-    fs2, y = ler_txt_vallen_arquivo(arquivo_y)
+    if experimento_sel:
+        caminho_exp = os.path.join(PASTA_RAIZ, experimento_sel)
+        
+        # 3. Identificar pares de arquivos (ex: 11 e 12, 21 e 22)
+        arquivos = os.listdir(caminho_exp)
+        prefixos = sorted(list(set([f[0] for f in arquivos if f.endswith(".txt") and len(f) >= 2])))
+        
+        escolha_par = st.sidebar.radio("Escolha o par de arquivos:", prefixos, format_func=lambda x: f"Arquivos {x}1.txt e {x}2.txt")
 
-    if fs1 is None or fs2 is None:
-        st.error("Não foi possível encontrar o SampleRate nos arquivos.")
-    else:
-        fs = fs1
+        arq_x = os.path.join(caminho_exp, f"{escolha_par}1.txt")
+        arq_y = os.path.join(caminho_exp, f"{escolha_par}2.txt")
 
-        x = x - np.mean(x)
-        y = y - np.mean(y)
+        if st.sidebar.button("Gerar Gráfico"):
+            fs1, x = ler_txt_vallen(arq_x)
+            fs2, y = ler_txt_vallen(arq_y)
 
-        janela_x = np.hanning(len(x))
-        janela_y = np.hanning(len(y))
+            if x is not None and y is not None:
+                st.success(f"Exibindo: {experimento_sel} - Par {escolha_par}")
+                
+                # --- CÁLCULOS ---
+                fs = fs1 if fs1 else 1.0
+                x_detrend = x - np.mean(x)
+                y_detrend = y - np.mean(y)
 
-        xw = x * janela_x
-        yw = y * janela_y
+                # --- PLOT ---
+                fig, ax = plt.subplots(2, 1, figsize=(10, 8))
+                
+                ax[0].plot(x_detrend, label="Canal 1", color="blue")
+                ax[0].set_title("Sinal no Tempo - Canal 1")
+                ax[0].grid(True)
 
-        X = np.fft.rfft(xw)
-        Y = np.fft.rfft(yw)
+                ax[1].plot(y_detrend, label="Canal 2", color="green")
+                ax[1].set_title("Sinal no Tempo - Canal 2")
+                ax[1].grid(True)
 
-        freq_x = np.fft.rfftfreq(len(xw), d=1/fs)
-        freq_y = np.fft.rfftfreq(len(yw), d=1/fs)
-
-        amp_x = np.abs(X)
-        amp_y = np.abs(Y)
-
-        pico_x = freq_x[np.argmax(amp_x[1:]) + 1]
-        pico_y = freq_y[np.argmax(amp_y[1:]) + 1]
-
-        st.subheader("Frequências dominantes")
-        col1, col2 = st.columns(2)
-        col1.metric("Canal 1", f"{pico_x:.2f} Hz")
-        col2.metric("Canal 2", f"{pico_y:.2f} Hz")
-
-        fig, axs = plt.subplots(2, 2, figsize=(14, 8))
-
-        axs[0, 0].plot(x, color="blue")
-        axs[0, 0].set_title("Canal 1 no tempo")
-        axs[0, 0].set_xlabel("Amostra")
-        axs[0, 0].set_ylabel("Amplitude")
-        axs[0, 0].grid(True)
-
-        axs[0, 1].plot(y, color="green")
-        axs[0, 1].set_title("Canal 2 no tempo")
-        axs[0, 1].set_xlabel("Amostra")
-        axs[0, 1].set_ylabel("Amplitude")
-        axs[0, 1].grid(True)
-
-        axs[1, 0].plot(freq_x, amp_x, color="blue")
-        axs[1, 0].set_title("FFT - Canal 1")
-        axs[1, 0].set_xlabel("Frequência (Hz)")
-        axs[1, 0].set_ylabel("Amplitude")
-        axs[1, 0].grid(True)
-        axs[1, 0].set_xlim(0, fs/2)
-
-        axs[1, 1].plot(freq_y, amp_y, color="green")
-        axs[1, 1].set_title("FFT - Canal 2")
-        axs[1, 1].set_xlabel("Frequência (Hz)")
-        axs[1, 1].set_ylabel("Amplitude")
-        axs[1, 1].grid(True)
-        axs[1, 1].set_xlim(0, fs/2)
-
-        plt.tight_layout()
-        st.pyplot(fig)
+                plt.tight_layout()
+                st.pyplot(fig)
+                
+                # Botão para download dos dados processados (opcional)
+                st.download_button("Baixar dados Canal 1 (CSV)", str(x_detrend), "canal1.csv")
+            else:
+                st.error("Arquivos não encontrados ou vazios.")
