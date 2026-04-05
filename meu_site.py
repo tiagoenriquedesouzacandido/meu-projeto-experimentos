@@ -101,35 +101,56 @@ else:
 
     else:  # MODO COMPARAÇÃO
         st.sidebar.subheader("Experimento A")
-        exp_a = st.sidebar.selectbox("Material A:", subpastas)
+        exp_a = st.sidebar.selectbox("Material A:", subpastas, index=0)
+        
         st.sidebar.subheader("Experimento B")
-        exp_b = st.sidebar.selectbox("Material B:", subpastas)
+        # Tenta colocar o segundo material diferente do primeiro por padrão
+        idx_b = 1 if len(subpastas) > 1 else 0
+        exp_b = st.sidebar.selectbox("Material B:", subpastas, index=idx_b)
         
         if st.sidebar.button("⚡ Comparar"):
-            fs_a, x_a = ler_txt_vallen(os.path.join(PASTA_RAIZ, exp_a, "11.txt"))
-            fs_b, x_b = ler_txt_vallen(os.path.join(PASTA_RAIZ, exp_b, "11.txt"))
+            # Função auxiliar para pegar o primeiro arquivo disponível na pasta
+            def pegar_primeiro_txt(subpasta):
+                caminho = os.path.join(PASTA_RAIZ, subpasta)
+                txts = sorted([f for f in os.listdir(caminho) if f.endswith(".txt") and f[0].isdigit()])
+                return os.path.join(caminho, txts[0]) if txts else None
 
-            if x_a is not None and x_b is not None:
-                x_a = x_a - np.mean(x_a)
-                x_b = x_b - np.mean(x_b)
+            arq_a = pegar_primeiro_txt(exp_a)
+            arq_b = pegar_primeiro_txt(exp_b)
 
-                st.subheader(f"⚔️ Comparando: {exp_a} vs {exp_b} (Canais 1)")
+            if arq_a and arq_b:
+                fs_a, x_a = ler_txt_vallen(arq_a)
+                fs_b, x_b = ler_txt_vallen(arq_b)
 
-                fig, axs = plt.subplots(2, 1, figsize=(12, 10))
-                
-                # Gráfico Tempo
-                axs[0].plot(x_a, label=exp_a, alpha=0.7); axs[0].plot(x_b, label=exp_b, alpha=0.7)
-                axs[0].set_title("Sinais no Tempo - Sobrepostos"); axs[0].legend(); axs[0].grid(True)
+                if x_a is not None and x_b is not None:
+                    # Normalização para comparação justa
+                    x_a = (x_a - np.mean(x_a)) / (np.max(np.abs(x_a - np.mean(x_a))))
+                    x_b = (x_b - np.mean(x_b)) / (np.max(np.abs(x_b - np.mean(x_b))))
 
-                # Gráfico FFT
-                max_len = max(len(x_a), len(x_b))
-                X_a_f = np.abs(np.fft.rfft(x_a, n=max_len))
-                X_b_f = np.abs(np.fft.rfft(x_b, n=max_len))
-                freq = np.fft.rfftfreq(max_len, d=1/fs_a)
-                
-                axs[1].plot(freq, X_a_f, label=f"FFT {exp_a}"); axs[1].plot(freq, X_b_f, label=f"FFT {exp_b}")
-                axs[1].set_title("Espectro de Frequência Comparativo"); axs[1].legend(); axs[1].grid(True)
-                axs[1].set_xlim(0, fs_a/4)
+                    st.subheader(f"⚔️ Comparação de Amplitude Normalizada")
+                    st.info(f"Exibindo: {os.path.basename(arq_a)} (Azul) vs {os.path.basename(arq_b)} (Laranja)")
 
+                    fig, axs = plt.subplots(2, 1, figsize=(12, 10))
+                    
+                    # Gráfico Tempo
+                    axs[0].plot(x_a, label=exp_a, color="#1f77b4", alpha=0.8)
+                    axs[0].plot(x_b, label=exp_b, color="#ff7f0e", alpha=0.8)
+                    axs[0].set_title("Sinais no Tempo - Sobrepostos"); axs[0].legend(); axs[0].grid(True)
+
+                    # Gráfico FFT
+                    max_len = max(len(x_a), len(x_b))
+                    X_a_f = np.abs(np.fft.rfft(x_a, n=max_len))
+                    X_b_f = np.abs(np.fft.rfft(x_b, n=max_len))
+                    freq = np.fft.rfftfreq(max_len, d=1/(fs_a if fs_a else 1.0))
+                    
+                    axs[1].plot(freq, X_a_f, label=f"FFT {exp_a}", color="#1f77b4")
+                    axs[1].plot(freq, X_b_f, label=f"FFT {exp_b}", color="#ff7f0e")
+                    axs[1].set_title("Espectro de Frequência Comparativo"); axs[1].legend(); axs[1].grid(True)
+                    axs[1].set_xlim(0, (fs_a if fs_a else 1000)/4)
+
+                    plt.tight_layout()
+                    st.pyplot(fig)
+            else:
+                st.error("Não foram encontrados arquivos .txt válidos em uma das pastas.")
                 plt.tight_layout()
                 st.pyplot(fig)
