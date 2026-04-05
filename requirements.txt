@@ -1,7 +1,3 @@
-<<<<<<< HEAD
 streamlit
+numpy
 matplotlib
-=======
-streamlit
-matplotlib
->>>>>>> da0033443619a32de3fa6756139b59a770eb2f06
