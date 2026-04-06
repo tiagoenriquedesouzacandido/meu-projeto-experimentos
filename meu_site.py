@@ -171,9 +171,11 @@ else:
         if st.sidebar.button("⚡ Comparar"):
             def pegar_dados(subpasta):
                 caminho = os.path.join(PASTA_RAIZ, subpasta)
-                arq_x = os.path.join(caminho, "11.txt")
-                arq_y = os.path.join(caminho, "12.txt")
-                if not os.path.exists(arq_x) or not os.path.exists(arq_y):
+                todos = os.listdir(caminho)
+                arq_x = next((f for f in todos if f.startswith("11") and f.endswith(".txt")), None)
+                 arq_y = next((f for f in todos if f.startswith("12") and f.endswith(".txt")), None)
+    
+                 if not arq_x or not arq_y:
                     return None, None, None
                 fs, x = ler_txt_vallen(arq_x)
                 _, y = ler_txt_vallen(arq_y)
