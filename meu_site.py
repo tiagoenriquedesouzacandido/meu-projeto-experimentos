@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from scipy import signal
 
 st.set_page_config(page_title="Analisador de Experimentos", layout="wide")
-st.title("📊 Analisador de Experimentos Online v2.1")
+st.title("📊 Analisador de Experimentos Online v2.2")
 
 PASTA_RAIZ = "experimentos"
 
@@ -60,34 +60,39 @@ else:
         caminho_exp = os.path.join(PASTA_RAIZ, experimento_sel)
         arquivos = os.listdir(caminho_exp)
         prefixos = sorted(list(set([f[0] for f in arquivos if f.endswith(".txt") and len(f) >= 2 and f[0].isdigit()])))
-        escolha_par = st.sidebar.radio("Escolha o par:", prefixos, format_func=lambda x: f"Par {x}1 e {x}2")
+        
+        if not prefixos:
+            st.warning("Nenhum par de arquivos encontrado.")
+        else:
+            escolha_par = st.sidebar.radio("Escolha o par:", prefixos, format_func=lambda x: f"Par {x}1 e {x}2")
 
-        if st.sidebar.button("📉 Gerar Análise"):
-            fs, x = ler_txt_vallen(os.path.join(caminho_exp, f"{escolha_par}1.txt"))
-            _, y = ler_txt_vallen(os.path.join(caminho_exp, f"{escolha_par}2.txt"))
+            if st.sidebar.button("📉 Gerar Análise"):
+                fs, x = ler_txt_vallen(os.path.join(caminho_exp, f"{escolha_par}1.txt"))
+                _, y = ler_txt_vallen(os.path.join(caminho_exp, f"{escolha_par}2.txt"))
 
-            if x is not None and y is not None:
-                x, y = x - np.mean(x), y - np.mean(y)
-                if usar_filtro:
-                    sos = signal.butter(4, freq_corte, fs=fs, btype='low', output='sos')
-                    x, y = signal.sosfilt(sos, x), signal.sosfilt(sos, y)
-                
-                st.subheader(f"📊 {experimento_sel}")
-                fig, axs = plt.subplots(2, 2, figsize=(14, 8))
-                axs[0,0].plot(x, color="blue"); axs[0,0].set_title("Canal 1 - Tempo")
-                axs[0,1].plot(y, color="green"); axs[0,1].set_title("Canal 2 - Tempo")
-                
-                X_f = np.abs(np.fft.rfft(x)); Y_f = np.abs(np.fft.rfft(y))
-                freq = np.fft.rfftfreq(len(x), d=1/fs)
-                axs[1,0].plot(freq, X_f, label="C1"); axs[1,0].plot(freq, Y_f, label="C2")
-                axs[1,0].set_title("FFT"); axs[1,0].set_xlim(0, fs/4); axs[1,0].legend()
-                
-                axs[1,1].plot(x[:len(y)], y[:len(x)], color="purple", alpha=0.6)
-                axs[1,1].set_title("Lissajous (C1 vs C2) - Gancho")
-                
-                for ax in axs.flat: ax.grid(True)
-                plt.tight_layout()
-                st.pyplot(fig)
+                if x is not None and y is not None:
+                    x, y = x - np.mean(x), y - np.mean(y)
+                    if usar_filtro and fs:
+                        sos = signal.butter(4, freq_corte, fs=fs, btype='low', output='sos')
+                        x, y = signal.sosfilt(sos, x), signal.sosfilt(sos, y)
+                    
+                    st.subheader(f"📊 {experimento_sel} - Par {escolha_par}")
+                    fig, axs = plt.subplots(2, 2, figsize=(14, 8))
+                    axs[0,0].plot(x, color="blue"); axs[0,0].set_title("Canal 1 - Tempo")
+                    axs[0,1].plot(y, color="green"); axs[0,1].set_title("Canal 2 - Tempo")
+                    
+                    X_f = np.abs(np.fft.rfft(x)); Y_f = np.abs(np.fft.rfft(y))
+                    freq = np.fft.rfftfreq(len(x), d=1/(fs if fs else 1.0))
+                    axs[1,0].plot(freq, X_f, label="C1"); axs[1,0].plot(freq, Y_f, label="C2")
+                    axs[1,0].set_title("FFT Sobreposta"); axs[1,0].set_xlim(0, (fs if fs else 1000)/4); axs[1,0].legend()
+                    
+                    min_len = min(len(x), len(y))
+                    axs[1,1].plot(x[:min_len], y[:min_len], color="purple", alpha=0.6)
+                    axs[1,1].set_title("Lissajous (C1 vs C2)")
+                    
+                    for ax in axs.flat: ax.grid(True)
+                    plt.tight_layout()
+                    st.pyplot(fig)
 
     else:  # MODO COMPARAÇÃO
         exp_a = st.sidebar.selectbox("Material A:", subpastas, index=0)
@@ -97,9 +102,9 @@ else:
             def pegar_dados(subpasta):
                 caminho = os.path.join(PASTA_RAIZ, subpasta)
                 txts = sorted([f for f in os.listdir(caminho) if f.endswith(".txt") and f[0].isdigit()])
-                if not txts: return None, None, None
+                if len(txts) < 2: return None, None, None
                 fs, x = ler_txt_vallen(os.path.join(caminho, txts[0]))
-                _, y = ler_txt_vallen(os.path.join(caminho, txts[1])) if len(txts)>1 else (fs, x)
+                _, y = ler_txt_vallen(os.path.join(caminho, txts[1]))
                 return fs, x, y
 
             fs_a, x_a, y_a = pegar_dados(exp_a)
@@ -114,19 +119,27 @@ else:
                     x_b = signal.sosfilt(sos_b, x_b)
 
                 st.subheader(f"⚔️ Comparação: {exp_a} vs {exp_b}")
-                fig, axs = plt.subplots(2, 2, figsize=(14, 8))
+                fig, axs = plt.subplots(2, 2, figsize=(14, 10))
                 
                 axs[0,0].plot(x_a, label=exp_a); axs[0,0].plot(x_b, label=exp_b)
-                axs[0,0].set_title("Sinais no Tempo"); axs[0,0].legend()
+                axs[0,0].set_title("Sinais no Tempo (Sobrepostos)"); axs[0,0].legend(); axs[0,0].grid(True)
                 
-                axs[0,1].plot(x_a[:len(y_a)], y_a[:len(x_a)], label=f"Gancho {exp_a}")
-                axs[0,1].plot(x_b[:len(y_b)], y_b[:len(x_b)], label=f"Gancho {exp_b}")
-                axs[0,1].set_title("Lissajous Comparativo"); axs[0,1].legend()
+                ml = min(len(x_a), len(x_b))
+                axs[0,1].plot(x_a[:ml], x_b[:ml], color="purple", alpha=0.5)
+                axs[0,1].set_title("Sincronia A vs B (Lissajous)"); axs[0,1].grid(True)
 
-                max_len = max(len(x_a), len(x_b))
-                X_a_f = np.abs(np.fft.rfft(x_a, n=max_len)); X_b_f = np.abs(np.fft.rfft(x_b, n=max_len))
-                freq = np.fft.rfftfreq(max_len, d=1/fs_a)
-                axs[1,0].plot(freq, X_a_f, label=exp_a); axs[1,0].plot(freq, X_b_f, label=exp_b)
-                axs[1,0].set_title("FFT Comparativa"); axs[1,0].set_xlim(0, fs_a/4); axs[1,0].legend()
+                max_f = max(len(x_a), len(x_b))
+                Xa_f = np.abs(np.fft.rfft(x_a, n=max_f)); Xb_f = np.abs(np.fft.rfft(x_b, n=max_f))
+                freq = np.fft.rfftfreq(max_f, d=1/fs_a)
+                axs[1,0].plot(freq, Xa_f, label=exp_a); axs[1,0].plot(freq, Xb_f, label=exp_b)
+                axs[1,0].set_title("FFT Comparativa"); axs[1,0].set_xlim(0, fs_a/4); axs[1,0].legend(); axs[1,0].grid(True)
 
+                na = (x_a - np.mean(x_a)) / (np.std(x_a) * len(x_a))
+                nb = (x_b - np.mean(x_b)) / (np.std(x_b))
+                corr = signal.correlate(na, nb, mode='same')
+                lags = np.arange(-len(corr)//2, len(corr)//2)
+                axs[1,1].plot(lags, corr, color="red")
+                axs[1,1].set_title("Atraso entre Materiais (Correlação)"); axs[1,1].grid(True)
+
+                plt.tight_layout()
                 st.pyplot(fig)
