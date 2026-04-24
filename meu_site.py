@@ -6,6 +6,41 @@ from scipy import signal
 import pandas as pd
 
 st.set_page_config(page_title="Ensaio de Emissão Acústica", layout="wide")
+
+# =========================
+# LOGIN
+# =========================
+USUARIOS = {
+    "tiago": "carbono123",
+    "orientador": "acustica2024"
+}
+
+if "logado" not in st.session_state:
+    st.session_state.logado = False
+
+if not st.session_state.logado:
+    st.title("🔒 Acesso Restrito")
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.subheader("Entre com suas credenciais")
+        usuario = st.text_input("👤 Usuário")
+        senha = st.text_input("🔑 Senha", type="password")
+        if st.button("Entrar", use_container_width=True):
+            if usuario in USUARIOS and USUARIOS[usuario] == senha:
+                st.session_state.logado = True
+                st.session_state.usuario = usuario
+                st.rerun()
+            else:
+                st.error("❌ Usuário ou senha incorretos.")
+    st.stop()
+
+# Botão de logout na sidebar
+st.sidebar.markdown(f"👤 **{st.session_state.usuario}**")
+if st.sidebar.button("🚪 Sair"):
+    st.session_state.logado = False
+    st.rerun()
+
 st.title("📡 Ensaio de Emissão Acústica")
 
 PASTA_RAIZ = "experimentos"
@@ -149,43 +184,16 @@ else:
             # Gráficos
             t = np.arange(len(x))/fs*1e6
             fig, axs = plt.subplots(2,2,figsize=(14,8))
+            axs[0,0].plot(t,x); axs[0,0].set_title("Canal 1 (µs)"); axs[0,0].grid(True)
+            axs[0,1].plot(t,y,color="green"); axs[0,1].set_title("Canal 2 (µs)"); axs[0,1].grid(True)
 
-            # Canal 1 — Tempo
-            axs[0,0].plot(t, x, color="blue", linewidth=0.8)
-            axs[0,0].set_title("Canal 1 — Sinal no Tempo")
-            axs[0,0].set_xlabel("Tempo (µs)")
-            axs[0,0].set_ylabel("Amplitude (V)")
-            axs[0,0].grid(True)
-
-            # Canal 2 — Tempo
-            axs[0,1].plot(t, y, color="green", linewidth=0.8)
-            axs[0,1].set_title("Canal 2 — Sinal no Tempo")
-            axs[0,1].set_xlabel("Tempo (µs)")
-            axs[0,1].set_ylabel("Amplitude (V)")
-            axs[0,1].grid(True)
-
-            # FFT
             Xf = np.abs(np.fft.rfft(x))
             Yf = np.abs(np.fft.rfft(y))
-            freqs = np.fft.rfftfreq(len(x), 1/fs)/1000
-            pico_x = freqs[np.argmax(Xf[1:])+1]
-            pico_y = freqs[np.argmax(Yf[1:])+1]
-            axs[1,0].plot(freqs, Xf, color="blue", linewidth=0.8, label=f"C1 — Pico: {pico_x:.1f} kHz")
-            axs[1,0].plot(freqs, Yf, color="green", linewidth=0.8, label=f"C2 — Pico: {pico_y:.1f} kHz")
-            axs[1,0].set_title("FFT — Espectro de Frequência")
-            axs[1,0].set_xlabel("Frequência (kHz)")
-            axs[1,0].set_ylabel("Magnitude")
-            axs[1,0].legend()
-            axs[1,0].grid(True)
+            freqs = np.fft.rfftfreq(len(x),1/fs)/1000
+            axs[1,0].plot(freqs,Xf,label="C1"); axs[1,0].plot(freqs,Yf,label="C2")
+            axs[1,0].set_title("FFT (kHz)"); axs[1,0].legend(); axs[1,0].grid(True)
 
-            # Lissajous
-            min_len = min(len(x), len(y))
-            axs[1,1].plot(x[:min_len], y[:min_len], color="purple", linewidth=0.5, alpha=0.7)
-            axs[1,1].set_title("Lissajous — Canal 1 vs Canal 2")
-            axs[1,1].set_xlabel("Canal 1 (V)")
-            axs[1,1].set_ylabel("Canal 2 (V)")
-            axs[1,1].grid(True)
+            axs[1,1].plot(x,y,color="purple", alpha=0.6); axs[1,1].set_title("Lissajous"); axs[1,1].grid(True)
 
             plt.tight_layout()
             st.pyplot(fig)
-            plt.close(fig)
