@@ -11,8 +11,7 @@ st.set_page_config(page_title="Ensaio de Emissão Acústica", layout="wide")
 # LOGIN
 # =========================
 USUARIOS = {
-    "tiago": "carbono123",
-    "orientador": "acustica2024"
+    "Cermat1": "acustica2026"
 }
 
 if "logado" not in st.session_state:
@@ -100,11 +99,11 @@ def calcular_tabela(sinal, fs, nome):
     freq_dom = freq[np.argmax(X_f[1:])+1]/1000
     return {
         "Canal": nome,
-        "RMS": round(rms,5),
-        "Pico a Pico": round(pp,5),
-        "Energia": f"{energia:.2e}",
-        "Freq (kHz)": round(freq_dom,1),
-        "ζ": round(calcular_amortecimento(sinal),5)
+        "RMS (V)": round(rms, 5),
+        "Pico a Pico (V)": round(pp, 5),
+        "Energia (V²)": f"{energia:.2e}",
+        "Freq. Dom. (kHz)": round(freq_dom, 1),
+        "ζ": round(calcular_amortecimento(sinal), 5)
     }
 
 def aplicar_filtro(x, fs, fmin, fmax):
@@ -139,14 +138,12 @@ else:
     exp = st.sidebar.selectbox("📁 Experimento", subpastas)
     caminho_dir = os.path.join(PASTA_RAIZ, exp)
 
-    # Extrai prefixos únicos de arquivos que terminam em 1.txt ou 2.txt
     arquivos_no_dir = os.listdir(caminho_dir)
     prefixos = sorted(list(set([f[0] for f in arquivos_no_dir if f.endswith(".txt") and f[0].isdigit()])))
 
     par_id = st.sidebar.selectbox("🔢 Selecione o Par", prefixos, format_func=lambda x: f"Par {x}1 e {x}2")
 
     if st.sidebar.button("📉 Gerar Análise"):
-        # Busca automática pelos arquivos reais
         path_x = buscar_arquivo(caminho_dir, f"{par_id}1")
         path_y = buscar_arquivo(caminho_dir, f"{par_id}2")
 
@@ -163,37 +160,61 @@ else:
                 x = aplicar_filtro(x, fs, fmin, fmax)
                 y = aplicar_filtro(y, fs, fmin, fmax)
 
-            # Verificação
-            corr, atraso = verificar_par(x,y,fs)
+            corr, atraso = verificar_par(x, y, fs)
             st.subheader("✅ Verificação do Par")
             col1, col2 = st.columns(2)
             col1.metric("Correlação", f"{corr:.3f}")
             col2.metric("Atraso (µs)", f"{atraso:.2f}")
-
             if corr < 0.3: st.warning("⚠️ Baixa correlação detectada.")
             else: st.success("Par consistente ✅")
 
-            # Tabela
             st.subheader("📋 Tabela 1 — Parâmetros")
             df = pd.DataFrame([
-                calcular_tabela(x,fs,"Canal 1"),
-                calcular_tabela(y,fs,"Canal 2")
+                calcular_tabela(x, fs, "Canal 1"),
+                calcular_tabela(y, fs, "Canal 2")
             ])
             st.dataframe(df, use_container_width=True)
 
             # Gráficos
             t = np.arange(len(x))/fs*1e6
-            fig, axs = plt.subplots(2,2,figsize=(14,8))
-            axs[0,0].plot(t,x); axs[0,0].set_title("Canal 1 (µs)"); axs[0,0].grid(True)
-            axs[0,1].plot(t,y,color="green"); axs[0,1].set_title("Canal 2 (µs)"); axs[0,1].grid(True)
+            fig, axs = plt.subplots(2, 2, figsize=(14, 8))
 
+            # Canal 1 — Tempo
+            axs[0,0].plot(t, x, color="blue", linewidth=0.8)
+            axs[0,0].set_title("Canal 1 — Sinal no Tempo")
+            axs[0,0].set_xlabel("Tempo (µs)")
+            axs[0,0].set_ylabel("Amplitude (V)")
+            axs[0,0].grid(True)
+
+            # Canal 2 — Tempo
+            axs[0,1].plot(t, y, color="green", linewidth=0.8)
+            axs[0,1].set_title("Canal 2 — Sinal no Tempo")
+            axs[0,1].set_xlabel("Tempo (µs)")
+            axs[0,1].set_ylabel("Amplitude (V)")
+            axs[0,1].grid(True)
+
+            # FFT
             Xf = np.abs(np.fft.rfft(x))
             Yf = np.abs(np.fft.rfft(y))
-            freqs = np.fft.rfftfreq(len(x),1/fs)/1000
-            axs[1,0].plot(freqs,Xf,label="C1"); axs[1,0].plot(freqs,Yf,label="C2")
-            axs[1,0].set_title("FFT (kHz)"); axs[1,0].legend(); axs[1,0].grid(True)
+            freqs = np.fft.rfftfreq(len(x), 1/fs)/1000
+            pico_x = freqs[np.argmax(Xf[1:])+1]
+            pico_y = freqs[np.argmax(Yf[1:])+1]
+            axs[1,0].plot(freqs, Xf, color="blue", linewidth=0.8, label=f"C1 — Pico: {pico_x:.1f} kHz")
+            axs[1,0].plot(freqs, Yf, color="green", linewidth=0.8, label=f"C2 — Pico: {pico_y:.1f} kHz")
+            axs[1,0].set_title("FFT — Espectro de Frequência")
+            axs[1,0].set_xlabel("Frequência (kHz)")
+            axs[1,0].set_ylabel("Magnitude")
+            axs[1,0].legend()
+            axs[1,0].grid(True)
 
-            axs[1,1].plot(x,y,color="purple", alpha=0.6); axs[1,1].set_title("Lissajous"); axs[1,1].grid(True)
+            # Lissajous
+            min_len = min(len(x), len(y))
+            axs[1,1].plot(x[:min_len], y[:min_len], color="purple", linewidth=0.5, alpha=0.7)
+            axs[1,1].set_title("Lissajous — Canal 1 vs Canal 2")
+            axs[1,1].set_xlabel("Canal 1 (V)")
+            axs[1,1].set_ylabel("Canal 2 (V)")
+            axs[1,1].grid(True)
 
             plt.tight_layout()
             st.pyplot(fig)
+            plt.close(fig)
