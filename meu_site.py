@@ -51,19 +51,17 @@ PASTA_RAIZ = "experimentos"
 # =========================
 # FUNÇÕES AUXILIARES
 # =========================
-def buscar_arquivo(diretorio, prefixo):
-    arquivos = os.listdir(diretorio)
-    for f in arquivos:
-        if f.startswith(prefixo) and f.endswith(".txt"):
-            return os.path.join(diretorio, f)
-    return None
+def buscar_arquivo(diretorio, nome_base):
+    alvo = f"{nome_base}.txt"
+    caminho = os.path.join(diretorio, alvo)
+    return caminho if os.path.exists(caminho) else None
 
 def listar_pares_validos(diretorio):
     arquivos = os.listdir(diretorio)
     ids = set()
 
     for f in arquivos:
-        match = re.match(r"(\d+)([12])\.txt$", f)
+        match = re.match(r"^(\d+)([12])\.txt$", f)
         if match:
             ids.add(match.group(1))
 
@@ -107,28 +105,28 @@ def ler_txt_vallen(caminho_arquivo):
                 except:
                     pass
 
-    return sample_rate, np.array(dados)
+    return sample_rate, np.array(dados, dtype=float)
 
 def aplicar_filtro(x, fs, fmin, fmax):
-    if fs is None:
+    if fs is None or len(x) < 3:
         return x
 
     nyq = fs / 2
-    if fmax >= nyq or fmin <= 0 or fmin >= fmax:
+    if fmin <= 0 or fmax <= 0 or fmin >= fmax or fmax >= nyq:
         return x
 
     sos = signal.butter(2, [fmin, fmax], fs=fs, btype="bandpass", output="sos")
     return signal.sosfilt(sos, x)
 
 def calcular_amortecimento(dados):
-    if len(dados) == 0:
+    if len(dados) < 3:
         return 0.0
 
-    pico_ref = np.max(np.abs(dados))
-    if pico_ref == 0:
+    ref = np.max(np.abs(dados))
+    if ref == 0:
         return 0.0
 
-    picos, _ = signal.find_peaks(np.abs(dados), height=pico_ref * 0.2)
+    picos, _ = signal.find_peaks(np.abs(dados), height=ref * 0.2)
 
     if len(picos) < 2:
         return 0.0
@@ -142,69 +140,129 @@ def calcular_amortecimento(dados):
     log_dec = np.log(p1 / p2)
     return log_dec / np.sqrt((2 * np.pi) ** 2 + log_dec ** 2)
 
-def calcular_counts_duration_risetime(sinal, fs, threshold_frac=0.1):
+def calcular_counts_duration_risetime(sinal, fs, threshold_v):
     sinal_abs = np.abs(sinal)
 
-    if len(sinal_abs) == 0:
-        return 0, 0.0, 0.0, 0.0
+    if len(sinal_abs) == 0 or fs is None or fs <= 0:
+        return 0, 0.0, 0.0
 
-    pico = np.max(sinal_abs)
-    if pico == 0:
-        return 0, 0.0, 0.0, 0.0
+    if threshold_v <= 0:
+        threshold_v = 0.0
 
-    threshold = pico * threshold_frac
+    acima = sinal_abs >= threshold_v
 
-    # Counts = número de cruzamentos ascendentes do limiar
-    counts = np.sum((sinal_abs[:-1] < threshold) & (sinal_abs[1:] >= threshold))
+    if len(acima) < 2:
+        return 0, 0.0, 0.0
 
-    # Índices acima do limiar
-    acima = np.where(sinal_abs >= threshold)[0]
+    counts = np.sum((acima[:-1] == False) & (acima[1:] == True))
 
-    if len(acima) > 0 and fs:
-        duracao_us = (acima[-1] - acima[0]) / fs * 1e6
-        inicio_idx = acima[0]
-        pico_idx = np.argmax(sinal_abs)
-        if pico_idx >= inicio_idx:
-            rise_time_us = (pico_idx - inicio_idx) / fs * 1e6
-        else:
-            rise_time_us = 0.0
+    idx_acima = np.where(acima)[0]
+
+    if len(idx_acima) == 0:
+        return int(counts), 0.0, 0.0
+
+    inicio = idx_acima[0]
+    fim = idx_acima[-1]
+
+    duration_us = (fim - inicio) / fs * 1e6
+
+    janela = sinal_abs[inicio:fim + 1]
+    if len(janela) > 0:
+        pico_local = np.argmax(janela) + inicio
+        rise_time_us = (pico_local - inicio) / fs * 1e6
     else:
-        duracao_us = 0.0
         rise_time_us = 0.0
 
-    return int(counts), float(duracao_us), float(rise_time_us), float(threshold)
+    return int(counts), float(duration_us), float(rise_time_us)
 
-def calcular_tabela(sinal, fs, nome, threshold_frac=0.1):
-    rms = np.sqrt(np.mean(sinal ** 2)) if len(sinal) else 0.0
-    pp = (np.max(sinal) - np.min(sinal)) if len(sinal) else 0.0
-    energia = np.sum(sinal ** 2) if len(sinal) else 0.0
-    pico = np.max(np.abs(sinal)) if len(sinal) else 0.0
+def calcular_temporal_centroid(sinal, fs):
+    if fs is None or len(sinal) == 0:
+        return 0.0
 
-    counts, duration_us, rise_time_us, threshold = calcular_counts_duration_risetime(
-        sinal, fs, threshold_frac
+    energia = sinal ** 2
+    soma_energia = np.sum(energia)
+
+    if soma_energia <= 0:
+        return 0.0
+
+    t_us = np.arange(len(sinal)) / fs * 1e6
+    centroid_us = np.sum(t_us * energia) / soma_energia
+    return float(centroid_us)
+
+def calcular_parametros_espectrais(sinal, fs, roll_on_frac=0.05, roll_off_frac=0.95):
+    if fs is None or len(sinal) < 2:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+    fft_vals = np.fft.rfft(sinal)
+    mag = np.abs(fft_vals)
+    power = mag ** 2
+    freqs = np.fft.rfftfreq(len(sinal), d=1 / fs)
+
+    if len(freqs) <= 1:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+    freqs = freqs[1:]
+    power = power[1:]
+
+    soma_power = np.sum(power)
+    if soma_power <= 0:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+    freq_dom_hz = freqs[np.argmax(power)]
+    freq_centroid_hz = np.sum(freqs * power) / soma_power
+    spectral_spread_hz = np.sqrt(np.sum(((freqs - freq_centroid_hz) ** 2) * power) / soma_power)
+
+    cumulativa = np.cumsum(power) / soma_power
+    idx_on = np.searchsorted(cumulativa, roll_on_frac)
+    idx_off = np.searchsorted(cumulativa, roll_off_frac)
+
+    idx_on = min(idx_on, len(freqs) - 1)
+    idx_off = min(idx_off, len(freqs) - 1)
+
+    roll_on_hz = freqs[idx_on]
+    roll_off_hz = freqs[idx_off]
+
+    return (
+        float(freq_dom_hz / 1000),
+        float(freq_centroid_hz / 1000),
+        float(roll_on_hz / 1000),
+        float(roll_off_hz / 1000),
+        float(spectral_spread_hz / 1000),
     )
 
-    if fs and len(sinal) > 1:
-        X_f = np.abs(np.fft.rfft(sinal))
-        freq = np.fft.rfftfreq(len(sinal), d=1 / fs)
-        if len(X_f) > 1:
-            freq_dom = freq[np.argmax(X_f[1:]) + 1] / 1000
-        else:
-            freq_dom = 0.0
+def calcular_tabela(sinal, fs, nome, threshold_v):
+    rms = np.sqrt(np.mean(sinal ** 2)) if len(sinal) else 0.0
+    pico = np.max(np.abs(sinal)) if len(sinal) else 0.0
+    pico_a_pico = (np.max(sinal) - np.min(sinal)) if len(sinal) else 0.0
+    energia = np.sum(sinal ** 2) if len(sinal) else 0.0
+
+    counts, duration_us, rise_time_us = calcular_counts_duration_risetime(sinal, fs, threshold_v)
+    temporal_centroid_us = calcular_temporal_centroid(sinal, fs)
+
+    freq_dom_khz, freq_centroid_khz, roll_on_khz, roll_off_khz, spectral_spread_khz = calcular_parametros_espectrais(sinal, fs)
+
+    if duration_us > 0:
+        average_frequency_khz = (counts / duration_us) * 1000
     else:
-        freq_dom = 0.0
+        average_frequency_khz = 0.0
 
     return {
         "Canal": nome,
         "RMS (V)": round(rms, 5),
         "Pico (V)": round(pico, 5),
-        "Pico a Pico (V)": round(pp, 5),
+        "Pico a Pico (V)": round(pico_a_pico, 5),
         "Energia (V²)": f"{energia:.2e}",
-        "Freq. Dom. (kHz)": round(freq_dom, 2),
-        "Counts": counts,
+        "Counts": int(counts),
         "Duration (µs)": round(duration_us, 2),
         "Rise Time (µs)": round(rise_time_us, 2),
-        "Threshold (V)": round(threshold, 5),
+        "Threshold (V)": round(float(threshold_v), 5),
+        "Temporal Centroid (µs)": round(temporal_centroid_us, 2),
+        "Average Frequency (kHz)": round(average_frequency_khz, 2),
+        "Freq. Dom. (kHz)": round(freq_dom_khz, 2),
+        "Frequency Centroid (kHz)": round(freq_centroid_khz, 2),
+        "Roll-on Frequency (kHz)": round(roll_on_khz, 2),
+        "Roll-off Frequency (kHz)": round(roll_off_khz, 2),
+        "Spectral Spread (kHz)": round(spectral_spread_khz, 2),
         "ζ": round(calcular_amortecimento(sinal), 5)
     }
 
@@ -213,7 +271,7 @@ def verificar_par(x, y, fs):
     x = x[:min_len]
     y = y[:min_len]
 
-    if len(x) < 2:
+    if len(x) < 2 or len(y) < 2:
         return 0.0, 0.0
 
     corr = np.corrcoef(x, y)[0, 1]
@@ -222,18 +280,24 @@ def verificar_par(x, y, fs):
     lag = np.argmax(cross) - (len(x) - 1)
     atraso_us = (lag / fs) * 1e6 if fs else 0.0
 
-    return corr, atraso_us
+    return float(corr), float(atraso_us)
 
-def gerar_excel_par(df_tabela, experimento, par_id):
+def gerar_excel_bytes(planilhas):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_tabela.to_excel(writer, index=False, sheet_name="Par")
-    output.seek(0)
-    return output
 
-def gerar_excel_experimento(diretorio, experimento, usar_filtro, fmin, fmax, threshold_frac):
+    try:
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            for nome, df in planilhas.items():
+                df.to_excel(writer, index=False, sheet_name=nome[:31])
+        output.seek(0)
+        return output
+    except ImportError:
+        return None
+    except ModuleNotFoundError:
+        return None
+
+def gerar_dataframe_experimento(diretorio, experimento, usar_filtro, fmin, fmax, threshold_v):
     resultados = []
-
     pares = listar_pares_validos(diretorio)
 
     for par_id in pares:
@@ -255,8 +319,8 @@ def gerar_excel_experimento(diretorio, experimento, usar_filtro, fmin, fmax, thr
 
         corr, atraso = verificar_par(x, y, fs)
 
-        tab_x = calcular_tabela(x, fs, "Canal 1", threshold_frac)
-        tab_y = calcular_tabela(y, fs, "Canal 2", threshold_frac)
+        tab_x = calcular_tabela(x, fs, "Canal 1", threshold_v)
+        tab_y = calcular_tabela(y, fs, "Canal 2", threshold_v)
 
         linha = {
             "Experimento": experimento,
@@ -268,35 +332,40 @@ def gerar_excel_experimento(diretorio, experimento, usar_filtro, fmin, fmax, thr
             "C1 Pico (V)": tab_x["Pico (V)"],
             "C1 Pico a Pico (V)": tab_x["Pico a Pico (V)"],
             "C1 Energia (V²)": tab_x["Energia (V²)"],
-            "C1 Freq. Dom. (kHz)": tab_x["Freq. Dom. (kHz)"],
             "C1 Counts": tab_x["Counts"],
             "C1 Duration (µs)": tab_x["Duration (µs)"],
             "C1 Rise Time (µs)": tab_x["Rise Time (µs)"],
             "C1 Threshold (V)": tab_x["Threshold (V)"],
+            "C1 Temporal Centroid (µs)": tab_x["Temporal Centroid (µs)"],
+            "C1 Average Frequency (kHz)": tab_x["Average Frequency (kHz)"],
+            "C1 Freq. Dom. (kHz)": tab_x["Freq. Dom. (kHz)"],
+            "C1 Frequency Centroid (kHz)": tab_x["Frequency Centroid (kHz)"],
+            "C1 Roll-on Frequency (kHz)": tab_x["Roll-on Frequency (kHz)"],
+            "C1 Roll-off Frequency (kHz)": tab_x["Roll-off Frequency (kHz)"],
+            "C1 Spectral Spread (kHz)": tab_x["Spectral Spread (kHz)"],
             "C1 ζ": tab_x["ζ"],
 
             "C2 RMS (V)": tab_y["RMS (V)"],
             "C2 Pico (V)": tab_y["Pico (V)"],
             "C2 Pico a Pico (V)": tab_y["Pico a Pico (V)"],
             "C2 Energia (V²)": tab_y["Energia (V²)"],
-            "C2 Freq. Dom. (kHz)": tab_y["Freq. Dom. (kHz)"],
             "C2 Counts": tab_y["Counts"],
             "C2 Duration (µs)": tab_y["Duration (µs)"],
             "C2 Rise Time (µs)": tab_y["Rise Time (µs)"],
             "C2 Threshold (V)": tab_y["Threshold (V)"],
+            "C2 Temporal Centroid (µs)": tab_y["Temporal Centroid (µs)"],
+            "C2 Average Frequency (kHz)": tab_y["Average Frequency (kHz)"],
+            "C2 Freq. Dom. (kHz)": tab_y["Freq. Dom. (kHz)"],
+            "C2 Frequency Centroid (kHz)": tab_y["Frequency Centroid (kHz)"],
+            "C2 Roll-on Frequency (kHz)": tab_y["Roll-on Frequency (kHz)"],
+            "C2 Roll-off Frequency (kHz)": tab_y["Roll-off Frequency (kHz)"],
+            "C2 Spectral Spread (kHz)": tab_y["Spectral Spread (kHz)"],
             "C2 ζ": tab_y["ζ"],
         }
 
         resultados.append(linha)
 
-    df_exp = pd.DataFrame(resultados)
-
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_exp.to_excel(writer, index=False, sheet_name="Experimento")
-    output.seek(0)
-
-    return output, df_exp
+    return pd.DataFrame(resultados)
 
 # =========================
 # INTERFACE
@@ -313,9 +382,14 @@ else:
     fmin = st.sidebar.number_input("Freq Min (Hz)", value=300000)
     fmax = st.sidebar.number_input("Freq Max (Hz)", value=600000)
 
-    st.sidebar.subheader("📏 Limiar")
-    threshold_percent = st.sidebar.slider("Threshold (% do pico)", 1, 50, 10)
-    threshold_frac = threshold_percent / 100
+    st.sidebar.subheader("📏 Threshold")
+    threshold_v = st.sidebar.number_input(
+        "Threshold absoluto (V)",
+        min_value=0.0,
+        value=0.10,
+        step=0.01,
+        format="%.4f"
+    )
 
     exp = st.sidebar.selectbox("📁 Experimento", subpastas)
     caminho_dir = os.path.join(PASTA_RAIZ, exp)
@@ -360,33 +434,44 @@ else:
                 else:
                     st.success("Par consistente ✅")
 
+                st.caption("Definições adotadas: Roll-on = 5% da energia espectral acumulada | Roll-off = 95%.")
+
                 st.subheader("📋 Tabela 1 — Parâmetros")
                 df = pd.DataFrame([
-                    calcular_tabela(x, fs, "Canal 1", threshold_frac),
-                    calcular_tabela(y, fs, "Canal 2", threshold_frac)
+                    calcular_tabela(x, fs, "Canal 1", threshold_v),
+                    calcular_tabela(y, fs, "Canal 2", threshold_v)
                 ])
                 st.dataframe(df, use_container_width=True)
 
-                # Download Excel do par atual
-                excel_par = gerar_excel_par(df, exp, par_id)
-                st.download_button(
-                    label="📥 Baixar Excel do Par Atual",
-                    data=excel_par,
-                    file_name=f"{exp}_par_{par_id}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                # Excel do par atual
+                excel_par = gerar_excel_bytes({"Par_Atual": df})
+                if excel_par is not None:
+                    st.download_button(
+                        label="📥 Baixar Excel do Par Atual",
+                        data=excel_par,
+                        file_name=f"{exp}_par_{par_id}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.warning("Não foi possível gerar Excel. Instale `openpyxl` no ambiente.")
+
+                # Excel e prévia do experimento inteiro
+                df_exp = gerar_dataframe_experimento(
+                    caminho_dir, exp, usar_filtro, fmin, fmax, threshold_v
                 )
 
-                # Download Excel do experimento inteiro
-                excel_exp, df_exp = gerar_excel_experimento(
-                    caminho_dir, exp, usar_filtro, fmin, fmax, threshold_frac
-                )
+                excel_exp = gerar_excel_bytes({"Experimento": df_exp}) if not df_exp.empty else None
 
-                st.download_button(
-                    label="📥 Baixar Excel do Experimento Inteiro",
-                    data=excel_exp,
-                    file_name=f"{exp}_completo.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                if excel_exp is not None:
+                    st.download_button(
+                        label="📥 Baixar Excel do Experimento Inteiro",
+                        data=excel_exp,
+                        file_name=f"{exp}_completo.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+                st.subheader("📊 Prévia dos dados do experimento")
+                st.dataframe(df_exp, use_container_width=True)
 
                 # Gráficos
                 t = np.arange(len(x)) / fs * 1e6
@@ -429,6 +514,3 @@ else:
                 plt.tight_layout()
                 st.pyplot(fig)
                 plt.close(fig)
-
-                st.subheader("📊 Prévia dos dados do experimento")
-                st.dataframe(df_exp, use_container_width=True)
