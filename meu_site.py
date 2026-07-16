@@ -12,9 +12,7 @@ st.set_page_config(page_title="Ensaio de Emissão Acústica", layout="wide")
 # =========================
 # LOGIN
 # =========================
-USUARIOS = {
-    "Cermat1": "acustica2026"
-}
+USUARIOS = {"Cermat1": "acustica2026"}
 
 if "logado" not in st.session_state:
     st.session_state.logado = False
@@ -119,28 +117,35 @@ def calcular_amortecimento(dados):
     log_dec = np.log(p1 / p2)
     return log_dec / np.sqrt((2 * np.pi) ** 2 + log_dec ** 2)
 
+# ✅ COUNTS CORRIGIDO — conta picos acima do threshold
 def calcular_counts_duration_risetime(sinal, fs, threshold_v):
+    if len(sinal) == 0 or fs is None or fs <= 0:
+        return 0, 0.0, 0.0
+
     sinal_abs = np.abs(sinal)
-    if len(sinal_abs) == 0 or fs is None or fs <= 0:
-        return 0, 0.0, 0.0
-    if threshold_v <= 0:
-        threshold_v = 0.0
-    acima = sinal_abs >= threshold_v
-    if len(acima) < 2:
-        return 0, 0.0, 0.0
-    counts = np.sum((acima[:-1] == False) & (acima[1:] == True))
-    idx_acima = np.where(acima)[0]
-    if len(idx_acima) == 0:
+    threshold_v = max(threshold_v, 0.0)
+
+    # Counts = número de picos acima do threshold
+    picos, _ = signal.find_peaks(sinal_abs, height=threshold_v)
+    counts = len(picos)
+
+    # Duration = tempo entre primeira e última amostra acima do threshold
+    acima = np.where(sinal_abs >= threshold_v)[0]
+    if len(acima) == 0:
         return int(counts), 0.0, 0.0
-    inicio = idx_acima[0]
-    fim = idx_acima[-1]
+
+    inicio = acima[0]
+    fim = acima[-1]
     duration_us = (fim - inicio) / fs * 1e6
+
+    # Rise Time = tempo do início até o pico máximo
     janela = sinal_abs[inicio:fim + 1]
     if len(janela) > 0:
         pico_local = np.argmax(janela) + inicio
         rise_time_us = (pico_local - inicio) / fs * 1e6
     else:
         rise_time_us = 0.0
+
     return int(counts), float(duration_us), float(rise_time_us)
 
 def calcular_temporal_centroid(sinal, fs):
@@ -181,7 +186,8 @@ def calcular_parametros_espectrais(sinal, fs, roll_on_frac=0.05, roll_off_frac=0
         float(spectral_spread_hz / 1000),
     )
 
-def calcular_tabela(sinal, fs, nome, threshold_v):
+# ✅ d1 e d2 adicionados na tabela
+def calcular_tabela(sinal, fs, nome, threshold_v, d1=None, d2=None):
     rms = np.sqrt(np.mean(sinal ** 2)) if len(sinal) else 0.0
     pico = np.max(np.abs(sinal)) if len(sinal) else 0.0
     pico_a_pico = (np.max(sinal) - np.min(sinal)) if len(sinal) else 0.0
@@ -189,8 +195,10 @@ def calcular_tabela(sinal, fs, nome, threshold_v):
     counts, duration_us, rise_time_us = calcular_counts_duration_risetime(sinal, fs, threshold_v)
     temporal_centroid_us = calcular_temporal_centroid(sinal, fs)
     freq_dom_khz, freq_centroid_khz, roll_on_khz, roll_off_khz, spectral_spread_khz = calcular_parametros_espectrais(sinal, fs)
+    # ✅ Average Frequency corrigida: Counts / Duration
     average_frequency_khz = (counts / duration_us) * 1000 if duration_us > 0 else 0.0
-    return {
+
+    resultado = {
         "Canal": nome,
         "RMS (V)": round(rms, 5),
         "Pico (V)": round(pico, 5),
@@ -207,8 +215,16 @@ def calcular_tabela(sinal, fs, nome, threshold_v):
         "Roll-on Frequency (kHz)": round(roll_on_khz, 2),
         "Roll-off Frequency (kHz)": round(roll_off_khz, 2),
         "Spectral Spread (kHz)": round(spectral_spread_khz, 2),
-        "ζ": round(calcular_amortecimento(sinal), 5)
+        "ζ": round(calcular_amortecimento(sinal), 5),
     }
+
+    # ✅ d1 e d2 na tabela (apenas Canal 1 por convenção)
+    if d1 is not None:
+        resultado["d1 (mm)"] = round(d1, 3)
+    if d2 is not None:
+        resultado["d2 (mm)"] = round(d2, 3)
+
+    return resultado
 
 def verificar_par(x, y, fs):
     min_len = min(len(x), len(y))
@@ -244,6 +260,7 @@ def gerar_excel_bytes(planilhas):
     except:
         return None
 
+# ✅ velocidade_ms agora é parâmetro por material
 def processar_experimento_completo(diretorio, experimento, usar_filtro, fmin, fmax, threshold_v, velocidade_ms, distancia_mm):
     resultados = []
     pares = listar_pares_validos(diretorio)
@@ -260,11 +277,9 @@ def processar_experimento_completo(diretorio, experimento, usar_filtro, fmin, fm
             x = aplicar_filtro(x, fs, fmin, fmax)
             y = aplicar_filtro(y, fs, fmin, fmax)
         corr, atraso = verificar_par(x, y, fs)
-        tab_x = calcular_tabela(x, fs, "Canal 1", threshold_v)
-        tab_y = calcular_tabela(y, fs, "Canal 2", threshold_v)
         d1, d2, delta_d = calcular_localizacao_toa(atraso, velocidade_ms, distancia_mm)
-
-        # Energia como float para estatísticas
+        tab_x = calcular_tabela(x, fs, "Canal 1", threshold_v, d1=d1, d2=d2)
+        tab_y = calcular_tabela(y, fs, "Canal 2", threshold_v)
         energia_x = np.sum(x ** 2)
         energia_y = np.sum(y ** 2)
 
@@ -331,9 +346,18 @@ else:
         format="%.4f"
     )
 
-    st.sidebar.subheader("📍 Localização ToA")
-    velocidade_ms = st.sidebar.number_input("Velocidade de propagação (m/s)", min_value=1.0, value=3000.0, step=100.0)
-    distancia_mm = st.sidebar.number_input("Distância entre sensores (mm)", min_value=0.1, value=29.75, step=0.01, format="%.2f")
+    st.sidebar.subheader("📐 Distância entre sensores")
+    distancia_mm = st.sidebar.number_input(
+        "Distância (mm)", min_value=0.1, value=29.75, step=0.01, format="%.2f"
+    )
+
+    # ✅ Velocidade por material na sidebar
+    st.sidebar.subheader("⚡ Velocidade por Material (m/s)")
+    velocidades_por_material = {}
+    for mat in subpastas:
+        velocidades_por_material[mat] = st.sidebar.number_input(
+            f"{mat}", min_value=1.0, value=3000.0, step=100.0, key=f"vel_{mat}"
+        )
 
     # =========================
     # ABAS PRINCIPAIS
@@ -351,6 +375,7 @@ else:
         exp = st.selectbox("📁 Experimento", subpastas)
         caminho_dir = os.path.join(PASTA_RAIZ, exp)
         prefixos = listar_pares_validos(caminho_dir)
+        velocidade_ms = velocidades_por_material.get(exp, 3000.0)
 
         if len(prefixos) == 0:
             st.warning("Nenhum par válido encontrado nessa pasta.")
@@ -411,7 +436,7 @@ else:
 
                     st.subheader("📋 Parâmetros")
                     df = pd.DataFrame([
-                        calcular_tabela(x, fs, "Canal 1", threshold_v),
+                        calcular_tabela(x, fs, "Canal 1", threshold_v, d1=d1, d2=d2),
                         calcular_tabela(y, fs, "Canal 2", threshold_v)
                     ])
                     st.dataframe(df, use_container_width=True)
@@ -486,16 +511,16 @@ else:
                 barra = st.progress(0)
                 for i, mat in enumerate(materiais_selecionados):
                     caminho_mat = os.path.join(PASTA_RAIZ, mat)
+                    vel_mat = velocidades_por_material.get(mat, 3000.0)
                     df_mat = processar_experimento_completo(
                         caminho_mat, mat, usar_filtro, fmin, fmax,
-                        threshold_v, velocidade_ms, distancia_mm
+                        threshold_v, vel_mat, distancia_mm
                     )
                     todos.append(df_mat)
                     barra.progress((i + 1) / len(materiais_selecionados))
 
                 if todos:
                     df_biblioteca = pd.concat(todos, ignore_index=True)
-
                     st.success(f"✅ Biblioteca gerada com {len(df_biblioteca)} eventos de {len(materiais_selecionados)} materiais.")
                     st.dataframe(df_biblioteca, use_container_width=True)
 
@@ -555,9 +580,10 @@ else:
                 barra2 = st.progress(0)
                 for i, mat in enumerate(materiais_comp):
                     caminho_mat = os.path.join(PASTA_RAIZ, mat)
+                    vel_mat = velocidades_por_material.get(mat, 3000.0)
                     df_mat = processar_experimento_completo(
                         caminho_mat, mat, usar_filtro, fmin, fmax,
-                        threshold_v, velocidade_ms, distancia_mm
+                        threshold_v, vel_mat, distancia_mm
                     )
                     todos_comp.append(df_mat)
                     barra2.progress((i + 1) / len(materiais_comp))
@@ -565,7 +591,6 @@ else:
                 if todos_comp:
                     df_comp = pd.concat(todos_comp, ignore_index=True)
 
-                    # Tabela estatística resumo
                     st.subheader("📋 Tabela Resumo Estatístico")
                     colunas_stat = [FEATURES_DISPONIVEIS[f] for f in features_escolhidas if FEATURES_DISPONIVEIS[f] in df_comp.columns]
                     df_stat = df_comp.groupby("Material")[colunas_stat].agg(["mean", "std", "min", "max"]).round(4)
@@ -580,7 +605,6 @@ else:
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
 
-                    # Gráficos de barras com erro
                     st.subheader("📊 Gráficos Comparativos")
                     n_features = len(features_escolhidas)
                     cols_graf = 2
@@ -588,26 +612,20 @@ else:
 
                     fig_comp, axs_comp = plt.subplots(rows_graf, cols_graf, figsize=(14, 4 * rows_graf))
                     axs_comp = np.array(axs_comp).flatten()
-
                     cores = plt.cm.tab10(np.linspace(0, 1, len(materiais_comp)))
 
                     for idx, feat_nome in enumerate(features_escolhidas):
                         col_key = FEATURES_DISPONIVEIS[feat_nome]
                         if col_key not in df_comp.columns:
                             continue
-
                         ax = axs_comp[idx]
-                        medias = []
-                        erros = []
-                        nomes = []
-
+                        medias, erros, nomes = [], [], []
                         for mat in materiais_comp:
                             subset = df_comp[df_comp["Material"] == mat][col_key].dropna()
                             if len(subset) > 0:
                                 medias.append(subset.mean())
                                 erros.append(subset.std())
                                 nomes.append(mat)
-
                         bars = ax.bar(nomes, medias, yerr=erros, capsize=5,
                                       color=cores[:len(nomes)], alpha=0.85, edgecolor="black")
                         ax.set_title(feat_nome, fontsize=11, fontweight="bold")
@@ -615,13 +633,11 @@ else:
                         ax.set_xlabel("Material")
                         ax.tick_params(axis="x", rotation=20)
                         ax.grid(True, axis="y", alpha=0.4)
-
                         for bar, val in zip(bars, medias):
                             ax.text(bar.get_x() + bar.get_width() / 2,
                                     bar.get_height() * 1.02,
                                     f"{val:.3f}", ha="center", va="bottom", fontsize=8)
 
-                    # Esconder eixos extras
                     for j in range(idx + 1, len(axs_comp)):
                         axs_comp[j].set_visible(False)
 
