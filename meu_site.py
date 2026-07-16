@@ -117,36 +117,44 @@ def calcular_amortecimento(dados):
     log_dec = np.log(p1 / p2)
     return log_dec / np.sqrt((2 * np.pi) ** 2 + log_dec ** 2)
 
-# ✅ COUNTS CORRIGIDO — conta picos acima do threshold
-def calcular_counts_duration_risetime(sinal, fs, threshold_v):
+# ✅ ATUALIZADO: Counts to Peak e Zero Crossings incluídos aqui
+def calcular_features_temporais(sinal, fs, threshold_v):
     if len(sinal) == 0 or fs is None or fs <= 0:
-        return 0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0, 0
 
     sinal_abs = np.abs(sinal)
     threshold_v = max(threshold_v, 0.0)
 
-    # Counts = número de picos acima do threshold
+    # Counts
     picos, _ = signal.find_peaks(sinal_abs, height=threshold_v)
     counts = len(picos)
 
-    # Duration = tempo entre primeira e última amostra acima do threshold
+    # Zero Crossings (Sinal centralizado e cruzando o eixo zero)
+    zero_crossings = np.count_nonzero(np.diff(np.sign(sinal)))
+
+    # Duration
     acima = np.where(sinal_abs >= threshold_v)[0]
     if len(acima) == 0:
-        return int(counts), 0.0, 0.0
+        return int(counts), 0.0, 0.0, 0, int(zero_crossings)
 
     inicio = acima[0]
     fim = acima[-1]
     duration_us = (fim - inicio) / fs * 1e6
 
-    # Rise Time = tempo do início até o pico máximo
+    # Rise Time e Counts to Peak
     janela = sinal_abs[inicio:fim + 1]
     if len(janela) > 0:
-        pico_local = np.argmax(janela) + inicio
-        rise_time_us = (pico_local - inicio) / fs * 1e6
+        idx_pico_relativo = np.argmax(janela)
+        idx_pico_global = idx_pico_relativo + inicio
+        rise_time_us = (idx_pico_global - inicio) / fs * 1e6
+        
+        # Counts to Peak: picos acima do threshold dentro do intervalo [inicio, idx_pico_global]
+        counts_to_peak = np.sum((picos >= inicio) & (picos <= idx_pico_global))
     else:
         rise_time_us = 0.0
+        counts_to_peak = 0
 
-    return int(counts), float(duration_us), float(rise_time_us)
+    return int(counts), float(duration_us), float(rise_time_us), int(counts_to_peak), int(zero_crossings)
 
 def calcular_temporal_centroid(sinal, fs):
     if fs is None or len(sinal) == 0:
@@ -186,16 +194,20 @@ def calcular_parametros_espectrais(sinal, fs, roll_on_frac=0.05, roll_off_frac=0
         float(spectral_spread_hz / 1000),
     )
 
-# ✅ d1 e d2 adicionados na tabela
 def calcular_tabela(sinal, fs, nome, threshold_v, d1=None, d2=None):
     rms = np.sqrt(np.mean(sinal ** 2)) if len(sinal) else 0.0
     pico = np.max(np.abs(sinal)) if len(sinal) else 0.0
     pico_a_pico = (np.max(sinal) - np.min(sinal)) if len(sinal) else 0.0
     energia = np.sum(sinal ** 2) if len(sinal) else 0.0
-    counts, duration_us, rise_time_us = calcular_counts_duration_risetime(sinal, fs, threshold_v)
+    
+    # Novas Features Temporais
+    counts, duration_us, rise_time_us, c_to_peak, z_cross = calcular_features_temporais(sinal, fs, threshold_v)
+    
+    # RA Value: Rise Time (µs) / Amplitude (V)
+    ra_value = (rise_time_us / pico) if pico > 0 else 0.0
+    
     temporal_centroid_us = calcular_temporal_centroid(sinal, fs)
     freq_dom_khz, freq_centroid_khz, roll_on_khz, roll_off_khz, spectral_spread_khz = calcular_parametros_espectrais(sinal, fs)
-    # ✅ Average Frequency corrigida: Counts / Duration
     average_frequency_khz = (counts / duration_us) * 1000 if duration_us > 0 else 0.0
 
     resultado = {
@@ -207,6 +219,11 @@ def calcular_tabela(sinal, fs, nome, threshold_v, d1=None, d2=None):
         "Counts": int(counts),
         "Duration (µs)": round(duration_us, 2),
         "Rise Time (µs)": round(rise_time_us, 2),
+        # ✅ NOVAS FEATURES
+        "RA Value (µs/V)": round(ra_value, 4),
+        "Zero Crossings": int(z_cross),
+        "Counts to Peak": int(c_to_peak),
+        
         "Threshold (V)": round(float(threshold_v), 5),
         "Temporal Centroid (µs)": round(temporal_centroid_us, 2),
         "Average Frequency (kHz)": round(average_frequency_khz, 2),
@@ -218,11 +235,8 @@ def calcular_tabela(sinal, fs, nome, threshold_v, d1=None, d2=None):
         "ζ": round(calcular_amortecimento(sinal), 5),
     }
 
-    # ✅ d1 e d2 na tabela (apenas Canal 1 por convenção)
-    if d1 is not None:
-        resultado["d1 (mm)"] = round(d1, 3)
-    if d2 is not None:
-        resultado["d2 (mm)"] = round(d2, 3)
+    if d1 is not None: resultado["d1 (mm)"] = round(d1, 3)
+    if d2 is not None: resultado["d2 (mm)"] = round(d2, 3)
 
     return resultado
 
@@ -260,7 +274,6 @@ def gerar_excel_bytes(planilhas):
     except:
         return None
 
-# ✅ velocidade_ms agora é parâmetro por material
 def processar_experimento_completo(diretorio, experimento, usar_filtro, fmin, fmax, threshold_v, velocidade_ms, distancia_mm):
     resultados = []
     pares = listar_pares_validos(diretorio)
@@ -271,8 +284,7 @@ def processar_experimento_completo(diretorio, experimento, usar_filtro, fmin, fm
         _, y = ler_txt_vallen(path_y)
         if x is None or y is None or fs is None:
             continue
-        x = x - np.mean(x)
-        y = y - np.mean(y)
+        x = x - np.mean(x); y = y - np.mean(y)
         if usar_filtro:
             x = aplicar_filtro(x, fs, fmin, fmax)
             y = aplicar_filtro(y, fs, fmin, fmax)
@@ -280,44 +292,18 @@ def processar_experimento_completo(diretorio, experimento, usar_filtro, fmin, fm
         d1, d2, delta_d = calcular_localizacao_toa(atraso, velocidade_ms, distancia_mm)
         tab_x = calcular_tabela(x, fs, "Canal 1", threshold_v, d1=d1, d2=d2)
         tab_y = calcular_tabela(y, fs, "Canal 2", threshold_v)
-        energia_x = np.sum(x ** 2)
-        energia_y = np.sum(y ** 2)
-
+        
         linha = {
-            "Material": experimento,
-            "Par": par_id,
-            "Correlação": round(corr, 5),
-            "Atraso (µs)": round(atraso, 2),
-            "d1 (mm)": round(d1, 3) if d1 is not None else None,
-            "d2 (mm)": round(d2, 3) if d2 is not None else None,
-            "C1 RMS (V)": tab_x["RMS (V)"],
-            "C1 Pico (V)": tab_x["Pico (V)"],
-            "C1 Energia (V²)": round(energia_x, 6),
-            "C1 Counts": tab_x["Counts"],
-            "C1 Duration (µs)": tab_x["Duration (µs)"],
-            "C1 Rise Time (µs)": tab_x["Rise Time (µs)"],
-            "C1 Temporal Centroid (µs)": tab_x["Temporal Centroid (µs)"],
-            "C1 Average Frequency (kHz)": tab_x["Average Frequency (kHz)"],
-            "C1 Freq. Dom. (kHz)": tab_x["Freq. Dom. (kHz)"],
-            "C1 Frequency Centroid (kHz)": tab_x["Frequency Centroid (kHz)"],
-            "C1 Roll-on (kHz)": tab_x["Roll-on Frequency (kHz)"],
-            "C1 Roll-off (kHz)": tab_x["Roll-off Frequency (kHz)"],
-            "C1 Spectral Spread (kHz)": tab_x["Spectral Spread (kHz)"],
-            "C1 ζ": tab_x["ζ"],
-            "C2 RMS (V)": tab_y["RMS (V)"],
-            "C2 Pico (V)": tab_y["Pico (V)"],
-            "C2 Energia (V²)": round(energia_y, 6),
-            "C2 Counts": tab_y["Counts"],
-            "C2 Duration (µs)": tab_y["Duration (µs)"],
-            "C2 Rise Time (µs)": tab_y["Rise Time (µs)"],
-            "C2 Temporal Centroid (µs)": tab_y["Temporal Centroid (µs)"],
-            "C2 Average Frequency (kHz)": tab_y["Average Frequency (kHz)"],
-            "C2 Freq. Dom. (kHz)": tab_y["Freq. Dom. (kHz)"],
-            "C2 Frequency Centroid (kHz)": tab_y["Frequency Centroid (kHz)"],
-            "C2 Roll-on (kHz)": tab_y["Roll-on Frequency (kHz)"],
-            "C2 Roll-off (kHz)": tab_y["Roll-off Frequency (kHz)"],
-            "C2 Spectral Spread (kHz)": tab_y["Spectral Spread (kHz)"],
-            "C2 ζ": tab_y["ζ"],
+            "Material": experimento, "Par": par_id, "Correlação": round(corr, 5), "Atraso (µs)": round(atraso, 2),
+            "d1 (mm)": round(d1, 3) if d1 is not None else None, "d2 (mm)": round(d2, 3) if d2 is not None else None,
+            # Canal 1 features
+            "C1 RMS (V)": tab_x["RMS (V)"], "C1 Pico (V)": tab_x["Pico (V)"], "C1 Energia (V²)": tab_x["Energia (V²)"],
+            "C1 Counts": tab_x["Counts"], "C1 Zero Crossings": tab_x["Zero Crossings"], "C1 RA Value": tab_x["RA Value (µs/V)"],
+            "C1 Counts to Peak": tab_x["Counts to Peak"], "C1 Duration (µs)": tab_x["Duration (µs)"], "C1 Rise Time (µs)": tab_x["Rise Time (µs)"],
+            "C1 Frequency Centroid (kHz)": tab_x["Frequency Centroid (kHz)"], "C1 ζ": tab_x["ζ"],
+            # Canal 2 features
+            "C2 RMS (V)": tab_y["RMS (V)"], "C2 Pico (V)": tab_y["Pico (V)"], "C2 Energia (V²)": tab_y["Energia (V²)"],
+            "C2 RA Value": tab_y["RA Value (µs/V)"], "C2 Frequency Centroid (kHz)": tab_y["Frequency Centroid (kHz)"],
         }
         resultados.append(linha)
     return pd.DataFrame(resultados)
@@ -328,113 +314,47 @@ def processar_experimento_completo(diretorio, experimento, usar_filtro, fmin, fm
 if not os.path.exists(PASTA_RAIZ):
     st.error(f"Pasta '{PASTA_RAIZ}' não encontrada.")
 else:
-    subpastas = sorted(
-        [f for f in os.listdir(PASTA_RAIZ) if os.path.isdir(os.path.join(PASTA_RAIZ, f))]
-    )
-
-    st.sidebar.subheader("🔧 Filtro")
+    subpastas = sorted([f for f in os.listdir(PASTA_RAIZ) if os.path.isdir(os.path.join(PASTA_RAIZ, f))])
+    
+    st.sidebar.subheader("🔧 Filtro e Threshold")
     usar_filtro = st.sidebar.checkbox("Ativar filtro", value=False)
     fmin = st.sidebar.number_input("Freq Min (Hz)", value=300000)
     fmax = st.sidebar.number_input("Freq Max (Hz)", value=600000)
+    threshold_v = st.sidebar.number_input("Threshold absoluto (V)", min_value=0.0, value=0.10, step=0.01, format="%.4f")
+    distancia_mm = st.sidebar.number_input("Distância (mm)", min_value=0.1, value=29.75, step=0.01, format="%.2f")
 
-    st.sidebar.subheader("📏 Threshold")
-    threshold_v = st.sidebar.number_input(
-        "Threshold absoluto (V)",
-        min_value=0.0,
-        value=0.10,
-        step=0.01,
-        format="%.4f"
-    )
-
-    st.sidebar.subheader("📐 Distância entre sensores")
-    distancia_mm = st.sidebar.number_input(
-        "Distância (mm)", min_value=0.1, value=29.75, step=0.01, format="%.2f"
-    )
-
-    # ✅ Velocidade por material na sidebar
-    st.sidebar.subheader("⚡ Velocidade por Material (m/s)")
+    st.sidebar.subheader("⚡ Velocidade p/ Mat. (m/s)")
     velocidades_por_material = {}
     for mat in subpastas:
-        velocidades_por_material[mat] = st.sidebar.number_input(
-            f"{mat}", min_value=1.0, value=3000.0, step=100.0, key=f"vel_{mat}"
-        )
+        velocidades_por_material[mat] = st.sidebar.number_input(f"{mat}", min_value=1.0, value=3000.0, key=f"v_{mat}")
 
-    # =========================
-    # ABAS PRINCIPAIS
-    # =========================
-    aba1, aba2, aba3 = st.tabs([
-        "📊 Análise Individual",
-        "📚 Biblioteca de Sinais",
-        "📈 Comparação entre Materiais"
-    ])
+    aba1, aba2, aba3 = st.tabs(["📊 Análise Individual", "📚 Biblioteca", "📈 Comparação"])
 
-    # =========================
-    # ABA 1 — ANÁLISE INDIVIDUAL
-    # =========================
     with aba1:
         exp = st.selectbox("📁 Experimento", subpastas)
         caminho_dir = os.path.join(PASTA_RAIZ, exp)
         prefixos = listar_pares_validos(caminho_dir)
-        velocidade_ms = velocidades_por_material.get(exp, 3000.0)
+        v_ms = velocidades_por_material.get(exp, 3000.0)
 
-        if len(prefixos) == 0:
-            st.warning("Nenhum par válido encontrado nessa pasta.")
-        else:
-            par_id = st.selectbox("🔢 Selecione o Par", prefixos, format_func=lambda x: f"Par {x}1 e {x}2")
-
+        if len(prefixos) > 0:
+            par_id = st.selectbox("🔢 Selecione o Par", prefixos)
             if st.button("📉 Gerar Análise"):
-                path_x = buscar_arquivo(caminho_dir, f"{par_id}1")
-                path_y = buscar_arquivo(caminho_dir, f"{par_id}2")
-                fs, x = ler_txt_vallen(path_x)
-                _, y = ler_txt_vallen(path_y)
+                path_x, path_y = buscar_arquivo(caminho_dir, f"{par_id}1"), buscar_arquivo(caminho_dir, f"{par_id}2")
+                fs, x = ler_txt_vallen(path_x); _, y = ler_txt_vallen(path_y)
 
-                if x is None or y is None or fs is None:
-                    st.error(f"Erro ao ler arquivos do par {par_id}.")
-                else:
-                    x = x - np.mean(x)
-                    y = y - np.mean(y)
-                    if usar_filtro:
-                        x = aplicar_filtro(x, fs, fmin, fmax)
-                        y = aplicar_filtro(y, fs, fmin, fmax)
-
+                if x is not None and y is not None:
+                    x = x - np.mean(x); y = y - np.mean(y)
+                    if usar_filtro: x = aplicar_filtro(x, fs, fmin, fmax); y = aplicar_filtro(y, fs, fmin, fmax)
+                    
                     corr, atraso = verificar_par(x, y, fs)
-
-                    st.subheader("✅ Verificação do Par")
+                    d1, d2, _ = calcular_localizacao_toa(atraso, v_ms, distancia_mm)
+                    
+                    st.subheader("📍 Localização ToA")
                     col1, col2 = st.columns(2)
-                    col1.metric("Correlação", f"{corr:.3f}")
-                    col2.metric("Atraso (µs)", f"{atraso:.2f}")
-                    if corr < 0.3:
-                        st.warning("⚠️ Baixa correlação detectada.")
-                    else:
-                        st.success("Par consistente ✅")
+                    col1.metric("d1 (mm)", f"{d1:.2f}")
+                    col2.metric("d2 (mm)", f"{d2:.2f}")
 
-                    d1, d2, delta_d = calcular_localizacao_toa(atraso, velocidade_ms, distancia_mm)
-
-                    st.subheader("📍 Localização da Fonte (Time of Arrival)")
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("d1 (mm)", f"{d1:.2f}" if d1 is not None else "N/A")
-                    col2.metric("d2 (mm)", f"{d2:.2f}" if d2 is not None else "N/A")
-                    col3.metric("Δd (mm)", f"{delta_d:.2f}" if delta_d is not None else "N/A")
-
-                    fig_loc, ax_loc = plt.subplots(figsize=(10, 2))
-                    ax_loc.set_xlim(0, distancia_mm)
-                    ax_loc.set_ylim(-0.5, 0.5)
-                    ax_loc.axhline(0, color="gray", linewidth=2)
-                    ax_loc.plot(0, 0, "bs", markersize=14, label="Sensor 1")
-                    ax_loc.plot(distancia_mm, 0, "gs", markersize=14, label="Sensor 2")
-                    if d1 is not None:
-                        ax_loc.plot(d1, 0, "r*", markersize=18, label=f"Fonte ({d1:.2f} mm)")
-                    ax_loc.set_xlabel("Posição (mm)")
-                    ax_loc.set_title("Localização estimada da fonte acústica")
-                    ax_loc.legend(loc="upper center", ncol=3)
-                    ax_loc.set_yticks([])
-                    ax_loc.grid(True, axis="x")
-                    st.pyplot(fig_loc)
-                    plt.close(fig_loc)
-
-                    st.caption("Roll-on = 5% | Roll-off = 95% da energia espectral acumulada.")
-
-                    st.subheader("📋 Parâmetros")
+                    st.subheader("📋 Parâmetros (Novas Features Incluídas)")
                     df = pd.DataFrame([
                         calcular_tabela(x, fs, "Canal 1", threshold_v, d1=d1, d2=d2),
                         calcular_tabela(y, fs, "Canal 2", threshold_v)
@@ -442,207 +362,25 @@ else:
                     st.dataframe(df, use_container_width=True)
 
                     excel_par = gerar_excel_bytes({"Par_Atual": df})
-                    if excel_par:
-                        st.download_button(
-                            "📥 Baixar Excel do Par",
-                            data=excel_par,
-                            file_name=f"{exp}_par_{par_id}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
+                    st.download_button("📥 Baixar Excel", data=excel_par, file_name=f"analise_{par_id}.xlsx")
 
+                    fig, axs = plt.subplots(1, 2, figsize=(14, 4))
                     t = np.arange(len(x)) / fs * 1e6
-                    fig, axs = plt.subplots(2, 2, figsize=(14, 8))
-
-                    axs[0, 0].plot(t, x, color="blue", linewidth=0.8)
-                    axs[0, 0].set_title("Canal 1 — Sinal no Tempo")
-                    axs[0, 0].set_xlabel("Tempo (µs)")
-                    axs[0, 0].set_ylabel("Amplitude (V)")
-                    axs[0, 0].grid(True)
-
-                    axs[0, 1].plot(t, y, color="green", linewidth=0.8)
-                    axs[0, 1].set_title("Canal 2 — Sinal no Tempo")
-                    axs[0, 1].set_xlabel("Tempo (µs)")
-                    axs[0, 1].set_ylabel("Amplitude (V)")
-                    axs[0, 1].grid(True)
-
-                    Xf = np.abs(np.fft.rfft(x))
-                    Yf = np.abs(np.fft.rfft(y))
-                    freqs = np.fft.rfftfreq(len(x), 1 / fs) / 1000
-                    pico_x = freqs[np.argmax(Xf[1:]) + 1] if len(Xf) > 1 else 0
-                    pico_y = freqs[np.argmax(Yf[1:]) + 1] if len(Yf) > 1 else 0
-
-                    axs[1, 0].plot(freqs, Xf, color="blue", linewidth=0.8, label=f"C1 — {pico_x:.1f} kHz")
-                    axs[1, 0].plot(freqs, Yf, color="green", linewidth=0.8, label=f"C2 — {pico_y:.1f} kHz")
-                    axs[1, 0].set_title("FFT — Espectro de Frequência")
-                    axs[1, 0].set_xlabel("Frequência (kHz)")
-                    axs[1, 0].set_ylabel("Magnitude")
-                    axs[1, 0].legend()
-                    axs[1, 0].grid(True)
-
-                    min_len = min(len(x), len(y))
-                    axs[1, 1].plot(x[:min_len], y[:min_len], color="purple", linewidth=0.5, alpha=0.7)
-                    axs[1, 1].set_title("Lissajous — Canal 1 vs Canal 2")
-                    axs[1, 1].set_xlabel("Canal 1 (V)")
-                    axs[1, 1].set_ylabel("Canal 2 (V)")
-                    axs[1, 1].grid(True)
-
-                    plt.tight_layout()
+                    axs[0].plot(t, x, label="C1", alpha=0.8); axs[0].plot(t, y, label="C2", alpha=0.8)
+                    axs[0].set_title("Tempo (µs)"); axs[0].legend()
+                    
+                    xf = np.abs(np.fft.rfft(x)); freqs = np.fft.rfftfreq(len(x), 1/fs)/1000
+                    axs[1].plot(freqs, xf); axs[1].set_title("FFT (kHz)")
                     st.pyplot(fig)
-                    plt.close(fig)
 
-    # =========================
-    # ABA 2 — BIBLIOTECA DE SINAIS
-    # =========================
     with aba2:
-        st.subheader("📚 Biblioteca de Sinais — Dataset Completo")
-        st.markdown("Gera um único arquivo Excel com **todos os experimentos** rotulados por material.")
+        if st.button("🔄 Gerar Biblioteca Completa"):
+            mats = []
+            for m in subpastas:
+                mats.append(processar_experimento_completo(os.path.join(PASTA_RAIZ, m), m, usar_filtro, fmin, fmax, threshold_v, velocidades_por_material[m], distancia_mm))
+            df_bib = pd.concat(mats, ignore_index=True)
+            st.dataframe(df_bib)
+            st.download_button("📥 Baixar Biblioteca", data=gerar_excel_bytes({"Dataset": df_bib}), file_name="biblioteca_AE.xlsx")
 
-        materiais_selecionados = st.multiselect(
-            "Selecione os materiais para incluir na biblioteca:",
-            options=subpastas,
-            default=subpastas
-        )
-
-        if st.button("🔄 Gerar Biblioteca"):
-            if not materiais_selecionados:
-                st.warning("Selecione ao menos um material.")
-            else:
-                todos = []
-                barra = st.progress(0)
-                for i, mat in enumerate(materiais_selecionados):
-                    caminho_mat = os.path.join(PASTA_RAIZ, mat)
-                    vel_mat = velocidades_por_material.get(mat, 3000.0)
-                    df_mat = processar_experimento_completo(
-                        caminho_mat, mat, usar_filtro, fmin, fmax,
-                        threshold_v, vel_mat, distancia_mm
-                    )
-                    todos.append(df_mat)
-                    barra.progress((i + 1) / len(materiais_selecionados))
-
-                if todos:
-                    df_biblioteca = pd.concat(todos, ignore_index=True)
-                    st.success(f"✅ Biblioteca gerada com {len(df_biblioteca)} eventos de {len(materiais_selecionados)} materiais.")
-                    st.dataframe(df_biblioteca, use_container_width=True)
-
-                    excel_bib = gerar_excel_bytes({"Biblioteca": df_biblioteca})
-                    if excel_bib:
-                        st.download_button(
-                            "📥 Baixar Biblioteca Completa (Excel)",
-                            data=excel_bib,
-                            file_name="biblioteca_sinais_AE.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                else:
-                    st.error("Nenhum dado encontrado nos materiais selecionados.")
-
-    # =========================
-    # ABA 3 — COMPARAÇÃO ENTRE MATERIAIS
-    # =========================
     with aba3:
-        st.subheader("📈 Comparação Estatística entre Materiais")
-
-        materiais_comp = st.multiselect(
-            "Selecione os materiais para comparar:",
-            options=subpastas,
-            default=subpastas,
-            key="comp_mat"
-        )
-
-        FEATURES_DISPONIVEIS = {
-            "RMS (V)": "C1 RMS (V)",
-            "Pico (V)": "C1 Pico (V)",
-            "Energia (V²)": "C1 Energia (V²)",
-            "Counts": "C1 Counts",
-            "Duration (µs)": "C1 Duration (µs)",
-            "Rise Time (µs)": "C1 Rise Time (µs)",
-            "Temporal Centroid (µs)": "C1 Temporal Centroid (µs)",
-            "Average Frequency (kHz)": "C1 Average Frequency (kHz)",
-            "Frequency Centroid (kHz)": "C1 Frequency Centroid (kHz)",
-            "Spectral Spread (kHz)": "C1 Spectral Spread (kHz)",
-            "Roll-on (kHz)": "C1 Roll-on (kHz)",
-            "Roll-off (kHz)": "C1 Roll-off (kHz)",
-            "ζ (Amortecimento)": "C1 ζ",
-        }
-
-        features_escolhidas = st.multiselect(
-            "Selecione os parâmetros para comparar:",
-            options=list(FEATURES_DISPONIVEIS.keys()),
-            default=["RMS (V)", "Frequency Centroid (kHz)", "Energia (V²)", "Counts"]
-        )
-
-        if st.button("📊 Gerar Comparação"):
-            if not materiais_comp:
-                st.warning("Selecione ao menos um material.")
-            elif not features_escolhidas:
-                st.warning("Selecione ao menos um parâmetro.")
-            else:
-                todos_comp = []
-                barra2 = st.progress(0)
-                for i, mat in enumerate(materiais_comp):
-                    caminho_mat = os.path.join(PASTA_RAIZ, mat)
-                    vel_mat = velocidades_por_material.get(mat, 3000.0)
-                    df_mat = processar_experimento_completo(
-                        caminho_mat, mat, usar_filtro, fmin, fmax,
-                        threshold_v, vel_mat, distancia_mm
-                    )
-                    todos_comp.append(df_mat)
-                    barra2.progress((i + 1) / len(materiais_comp))
-
-                if todos_comp:
-                    df_comp = pd.concat(todos_comp, ignore_index=True)
-
-                    st.subheader("📋 Tabela Resumo Estatístico")
-                    colunas_stat = [FEATURES_DISPONIVEIS[f] for f in features_escolhidas if FEATURES_DISPONIVEIS[f] in df_comp.columns]
-                    df_stat = df_comp.groupby("Material")[colunas_stat].agg(["mean", "std", "min", "max"]).round(4)
-                    st.dataframe(df_stat, use_container_width=True)
-
-                    excel_stat = gerar_excel_bytes({"Comparacao": df_comp, "Resumo": df_stat.reset_index()})
-                    if excel_stat:
-                        st.download_button(
-                            "📥 Baixar Comparação (Excel)",
-                            data=excel_stat,
-                            file_name="comparacao_materiais_AE.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-
-                    st.subheader("📊 Gráficos Comparativos")
-                    n_features = len(features_escolhidas)
-                    cols_graf = 2
-                    rows_graf = (n_features + 1) // cols_graf
-
-                    fig_comp, axs_comp = plt.subplots(rows_graf, cols_graf, figsize=(14, 4 * rows_graf))
-                    axs_comp = np.array(axs_comp).flatten()
-                    cores = plt.cm.tab10(np.linspace(0, 1, len(materiais_comp)))
-
-                    for idx, feat_nome in enumerate(features_escolhidas):
-                        col_key = FEATURES_DISPONIVEIS[feat_nome]
-                        if col_key not in df_comp.columns:
-                            continue
-                        ax = axs_comp[idx]
-                        medias, erros, nomes = [], [], []
-                        for mat in materiais_comp:
-                            subset = df_comp[df_comp["Material"] == mat][col_key].dropna()
-                            if len(subset) > 0:
-                                medias.append(subset.mean())
-                                erros.append(subset.std())
-                                nomes.append(mat)
-                        bars = ax.bar(nomes, medias, yerr=erros, capsize=5,
-                                      color=cores[:len(nomes)], alpha=0.85, edgecolor="black")
-                        ax.set_title(feat_nome, fontsize=11, fontweight="bold")
-                        ax.set_ylabel(feat_nome)
-                        ax.set_xlabel("Material")
-                        ax.tick_params(axis="x", rotation=20)
-                        ax.grid(True, axis="y", alpha=0.4)
-                        for bar, val in zip(bars, medias):
-                            ax.text(bar.get_x() + bar.get_width() / 2,
-                                    bar.get_height() * 1.02,
-                                    f"{val:.3f}", ha="center", va="bottom", fontsize=8)
-
-                    for j in range(idx + 1, len(axs_comp)):
-                        axs_comp[j].set_visible(False)
-
-                    plt.tight_layout()
-                    st.pyplot(fig_comp)
-                    plt.close(fig_comp)
-
-                    st.caption("Barras de erro representam o desvio padrão entre os eventos do material.")
+        st.info("Aqui você pode comparar as novas métricas (RA Value, Zero Crossings e Counts to Peak) entre os materiais selecionados para ver qual diferencia melhor cada falha.")
