@@ -328,15 +328,15 @@ if modo == "🔬 Visão Detalhada":
     arquivos = sorted([f for f in os.listdir(pasta_material) if f.endswith(".txt")])
     pares = {}
     for arq in arquivos:
-        # Identifica o par pelo primeiro caractere e o canal pelo segundo
-        # Ex: "11XX.txt" → par "1", canal 1 | "12XX.txt" → par "1", canal 2
-        if len(arq) >= 2:
-            chave = arq[0]
-            canal = arq[1]
+        # Remove extensão para trabalhar só com o nome
+        nome = os.path.splitext(arq)[0]  # ex: "31", "32", "11XX", "12XX"
+        if len(nome) >= 2:
+            ultimo = nome[-1]   # último caractere = canal (1 ou 2)
+            chave = nome[:-1]   # tudo antes = chave do par (ex: "3", "11X")
             pares.setdefault(chave, {})
-            if canal == "1":
+            if ultimo == "1":
                 pares[chave]["c1"] = arq
-            elif canal == "2":
+            elif ultimo == "2":
                 pares[chave]["c2"] = arq
 
     if not pares:
