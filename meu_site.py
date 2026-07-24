@@ -283,8 +283,7 @@ subpastas = sorted([
 if not subpastas:
     st.warning("Nenhum experimento encontrado.")
     st.stop()
-
-# ---- SIDEBAR ----
+# --- SIDEBAR (BARRA LATERAL) ---
 modo = st.sidebar.radio("Selecione o Modo:", [
     "🔬 Visão Detalhada",
     "🆚 Comparação",
@@ -292,47 +291,26 @@ modo = st.sidebar.radio("Selecione o Modo:", [
 ])
 
 st.sidebar.markdown("---")
+# Movi para cá para ficar sempre no topo
+material = st.sidebar.selectbox("Selecione o Experimento:", subpastas)
+pasta_material = os.path.join(PASTA_RAIZ, material)
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ Parâmetros de Análise")
-
-# Threshold em mV (os dados do Vallen estão em mV)
-threshold_mv = st.sidebar.number_input(
-    "Threshold (mV)", min_value=0.01, max_value=100.0, value=0.5, step=0.1
-)
-
-# Velocidade de propagação por material (para cálculo de distância via ToA)
-st.sidebar.markdown("---")
-st.sidebar.subheader("🔊 Velocidade de Propagação")
-vel_propagacao = {}
-for pasta in subpastas:
-    vel_propagacao[pasta] = st.sidebar.number_input(
-        f"Vel. {pasta} (m/s)", min_value=100, max_value=10000, value=2000, step=100
-    )
-
-# Botão de logout na sidebar
-st.sidebar.markdown("---")
-if st.sidebar.button("🚪 Sair"):
-    st.session_state["autenticado"] = False
-    st.rerun()
-
+threshold_mv = st.sidebar.number_input("Threshold (mV)", min_value=0.01, value=0.5)
 
 # ============================================================
 # MODO 1: VISÃO DETALHADA
-# Analisa um par de arquivos (Canal 1 + Canal 2) por vez
-# Mostra gráficos, ToA e tabela de features
 # ============================================================
 if modo == "🔬 Visão Detalhada":
-    material = st.sidebar.selectbox("Selecione o Experimento:", subpastas)
-    pasta_material = os.path.join(PASTA_RAIZ, material)
-
-    # Busca pares de arquivos (Canal 1 = 11XX.txt, Canal 2 = 12XX.txt)
+    # Busca pares de arquivos
     arquivos = sorted([f for f in os.listdir(pasta_material) if f.endswith(".txt")])
     pares = {}
     for arq in arquivos:
-        # Remove extensão para trabalhar só com o nome
-        nome = os.path.splitext(arq)[0]  # ex: "31", "32", "11XX", "12XX"
+        nome = os.path.splitext(arq)[0]
         if len(nome) >= 2:
-            ultimo = nome[-1]   # último caractere = canal (1 ou 2)
-            chave = nome[:-1]   # tudo antes = chave do par (ex: "3", "11X")
+            ultimo = nome[-1]
+            chave = nome[:-1]
             pares.setdefault(chave, {})
             if ultimo == "1":
                 pares[chave]["c1"] = arq
@@ -343,8 +321,12 @@ if modo == "🔬 Visão Detalhada":
         st.warning("Nenhum par de arquivos encontrado.")
         st.stop()
 
-    par_sel = st.sidebar.selectbox("Selecione o Par:", sorted(pares.keys()))
+    # ORDENAÇÃO NUMÉRICA: 1, 2, 3... 10, 11 (em vez de 1, 10, 11, 2)
+    pares_ordenados = sorted(pares.keys(), key=lambda x: int(x) if x.isdigit() else x)
+    par_sel = st.sidebar.selectbox("Selecione o Par:", pares_ordenados)
+    
     par = pares[par_sel]
+    # ... continua o resto do código ...
 
     # Leitura dos dois canais
     arq_c1 = os.path.join(pasta_material, par.get("c1", ""))
