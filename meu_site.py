@@ -39,7 +39,6 @@ PASTA_RAIZ = "experimentos"
 
 # ============================================================
 # FUNÇÃO: LER ARQUIVO .TXT DO SISTEMA VALLEN
-# Retorna sample_rate (Hz), dados (mV) e metadata (dict)
 # ============================================================
 def ler_txt_vallen(caminho_arquivo):
     if not os.path.exists(caminho_arquivo):
@@ -93,8 +92,6 @@ def ler_txt_vallen(caminho_arquivo):
 
 # ============================================================
 # FUNÇÃO: CONVERTER TEMPO DO METADATA PARA SEGUNDOS
-# Formato: "30 14:41:55 378.4898" → segundos desde meia-noite
-# Usado para calcular o Δt entre Canal 1 e Canal 2 (ToA)
 # ============================================================
 def parse_tempo(time_raw):
     try:
@@ -109,9 +106,12 @@ def parse_tempo(time_raw):
 
 # ============================================================
 # FUNÇÃO: CALCULAR FEATURES TEMPORAIS E ESPECTRAIS
-# Todos os cálculos são feitos sobre o sinal em mV
+# CORREÇÕES:
+#   - Rise Time: descontado o pretrigger para medir a partir do trigger real
+#   - Freq. Iniciação/Reverberação: interpolação parabólica para maior precisão
+#   - Adicionadas: Temporal Centroid, Average Frequency, Roll-on, Roll-off, Spectral Spread
 # ============================================================
-def calcular_features(dados, fs, threshold_mv=0.5):
+def calcular_features(dados, fs, threshold_mv=0.5, pretrigger=0):
     n = len(dados)
     if n == 0:
         return {}
@@ -119,37 +119,39 @@ def calcular_features(dados, fs, threshold_mv=0.5):
     dt = 1.0 / fs
     t = np.arange(n) * dt
 
-    # --- FEATURES TEMPORAIS BÁSICAS ---
+    # --- FEATURES TEMPORAIS ---
 
-    # RMS: energia média do sinal
     rms = np.sqrt(np.mean(dados**2))
-
-    # Pico: valor máximo absoluto
     pico = np.max(np.abs(dados))
-
-    # Energia: integral da potência no tempo
     energia = np.sum(dados**2) * dt
-
-    # Duration: tempo total do sinal em µs
     duration_us = n * dt * 1e6
 
-    # Rise Time: tempo do início até o pico máximo (em µs)
+    # Rise Time corrigido: tempo desde o trigger (descontando pretrigger) até o pico
     idx_pico = np.argmax(np.abs(dados))
-    rise_time_us = idx_pico * dt * 1e6
+    idx_trigger = pretrigger if pretrigger > 0 else 0
+    rise_samples = max(idx_pico - idx_trigger, 0)
+    rise_time_us = rise_samples * dt * 1e6
 
-    # Counts: cruzamentos positivos do threshold (de baixo para cima)
+    # Temporal Centroid: centro de massa temporal ponderado pela energia
+    # Indica quando ocorre a maior concentração de energia no tempo
+    energia_t = dados**2
+    if np.sum(energia_t) > 0:
+        temporal_centroid_us = np.sum(t * energia_t) / np.sum(energia_t) * 1e6
+    else:
+        temporal_centroid_us = 0.0
+
+    # Counts: cruzamentos positivos do threshold
     acima = dados > threshold_mv
     counts = int(np.sum(np.diff(acima.astype(int)) == 1))
 
-    # Counts to Peak: cruzamentos até o pico máximo
+    # Counts to Peak
     acima_ate_pico = dados[:idx_pico] > threshold_mv
     counts_to_peak = int(np.sum(np.diff(acima_ate_pico.astype(int)) == 1))
 
-    # RA Value: Rise Time / Amplitude — indica tipo de fratura
-    # Alto → cisalhamento; Baixo → tração
+    # RA Value
     ra_value = rise_time_us / pico if pico > 0 else 0
 
-    # Zero Crossings: número de vezes que o sinal cruza o zero
+    # Zero Crossings
     zc = int(np.sum(np.diff(np.sign(dados)) != 0))
 
     # --- FEATURES ESPECTRAIS (FFT) ---
@@ -157,69 +159,136 @@ def calcular_features(dados, fs, threshold_mv=0.5):
     espectro = np.abs(fft(dados))
     freqs_pos = freqs[:n // 2]
     espectro_pos = espectro[:n // 2]
+    pot_espectro = espectro_pos**2
 
-    # Frequência Centroide: centro de massa do espectro
+    pot_total = np.sum(pot_espectro)
+
+    # Frequência de Pico
+    idx_max_freq = np.argmax(espectro_pos)
+    freq_pico = freqs_pos[idx_max_freq]
+
+    # Frequência Centroide (1ª ordem)
     if np.sum(espectro_pos) > 0:
         freq_centroide = np.sum(freqs_pos * espectro_pos) / np.sum(espectro_pos)
     else:
         freq_centroide = 0
 
-    # Frequência de Pico: frequência com maior amplitude
-    idx_max_freq = np.argmax(espectro_pos)
-    freq_pico = freqs_pos[idx_max_freq]
+    # Average Frequency: média ponderada pela potência (espectro²)
+    # Diferente do centroide que usa amplitude; aqui usa potência
+    if pot_total > 0:
+        avg_frequency = np.sum(freqs_pos * pot_espectro) / pot_total
+    else:
+        avg_frequency = 0
 
-    # --- FEATURES AVANÇADAS ---
+    # Spectral Spread: desvio padrão espectral em torno da freq. centroide
+    # Mede a largura de banda do sinal
+    if np.sum(espectro_pos) > 0:
+        spectral_spread = np.sqrt(
+            np.sum(((freqs_pos - freq_centroide)**2) * espectro_pos) / np.sum(espectro_pos)
+        )
+    else:
+        spectral_spread = 0
 
-    # ZCR: taxa de cruzamentos de zero por segundo
+    # Roll-on Frequency: frequência onde acumula 15% da energia espectral total
+    # Indica onde o sinal começa a ter energia significativa
+    energia_acum = np.cumsum(pot_espectro)
+    energia_total_acum = energia_acum[-1] if energia_acum[-1] > 0 else 1
+    idx_rollon = np.searchsorted(energia_acum, 0.15 * energia_total_acum)
+    freq_rollon = freqs_pos[idx_rollon] if idx_rollon < len(freqs_pos) else 0
+
+    # Roll-off Frequency: frequência onde acumula 85% da energia espectral total
+    # Indica onde o sinal perde energia significativa
+    idx_rolloff = np.searchsorted(energia_acum, 0.85 * energia_total_acum)
+    freq_rolloff = freqs_pos[idx_rolloff] if idx_rolloff < len(freqs_pos) else 0
+
+    # ZCR
     zcr = zc / (n * dt)
 
-    # Amplitude Não-Dimensional: pico / RMS — quão impulsivo é o sinal
+    # Amp. Não-Dimensional
     amp_nd = pico / rms if rms > 0 else 0
 
-    # Partial Power: potência em banda 1–5 kHz / potência total
+    # Partial Power (banda 1–5 kHz)
     banda_inf, banda_sup = 1000, 5000
     mask_banda = (freqs_pos >= banda_inf) & (freqs_pos <= banda_sup)
-    pot_banda = np.sum(espectro_pos[mask_banda]**2)
-    pot_total = np.sum(espectro_pos**2)
+    pot_banda = np.sum(pot_espectro[mask_banda])
     partial_power = pot_banda / pot_total if pot_total > 0 else 0
 
+    # Freq. Pico Ponderada
+    freq_pico_pond = avg_frequency  # equivalente à média ponderada pela potência
+
     # Frequência de Iniciação: freq. dominante no 1º quarto do sinal
-    quarto = max(n // 4, 4)
-    espectro_inicio = np.abs(fft(dados[:quarto]))[:quarto // 2]
-    freqs_inicio = fftfreq(quarto, d=dt)[:quarto // 2]
-    freq_iniciacao = freqs_inicio[np.argmax(espectro_inicio)] if len(espectro_inicio) > 0 else 0
+    # CORREÇÃO: usa interpolação parabólica para maior precisão
+    quarto = max(n // 4, 16)
+    trecho_inicio = dados[:quarto]
+    esp_inicio = np.abs(fft(trecho_inicio))
+    freq_inicio_arr = fftfreq(len(trecho_inicio), d=dt)
+    mask_pos = freq_inicio_arr > 0
+    esp_i_pos = esp_inicio[mask_pos]
+    freq_i_pos = freq_inicio_arr[mask_pos]
+    if len(esp_i_pos) > 2:
+        idx_pk = np.argmax(esp_i_pos)
+        # Interpolação parabólica para refinar a frequência de pico
+        if 0 < idx_pk < len(esp_i_pos) - 1:
+            alpha = esp_i_pos[idx_pk - 1]
+            beta  = esp_i_pos[idx_pk]
+            gamma = esp_i_pos[idx_pk + 1]
+            denom = alpha - 2*beta + gamma
+            offset = 0.5 * (alpha - gamma) / denom if denom != 0 else 0
+            freq_iniciacao = freq_i_pos[idx_pk] + offset * (freq_i_pos[1] - freq_i_pos[0])
+        else:
+            freq_iniciacao = freq_i_pos[idx_pk]
+    else:
+        freq_iniciacao = 0
 
     # Frequência de Reverberação: freq. dominante no último quarto do sinal
-    espectro_rev = np.abs(fft(dados[-quarto:]))[:quarto // 2]
-    freq_reverbacao = freqs_inicio[np.argmax(espectro_rev)] if len(espectro_rev) > 0 else 0
-
-    # Frequência de Pico Ponderada: média ponderada pelo espectro²
-    freq_pico_pond = np.sum(freqs_pos * espectro_pos**2) / pot_total if pot_total > 0 else 0
+    trecho_rev = dados[-quarto:]
+    esp_rev = np.abs(fft(trecho_rev))
+    freq_rev_arr = fftfreq(len(trecho_rev), d=dt)
+    mask_pos_r = freq_rev_arr > 0
+    esp_r_pos = esp_rev[mask_pos_r]
+    freq_r_pos = freq_rev_arr[mask_pos_r]
+    if len(esp_r_pos) > 2:
+        idx_pk_r = np.argmax(esp_r_pos)
+        if 0 < idx_pk_r < len(esp_r_pos) - 1:
+            alpha = esp_r_pos[idx_pk_r - 1]
+            beta  = esp_r_pos[idx_pk_r]
+            gamma = esp_r_pos[idx_pk_r + 1]
+            denom = alpha - 2*beta + gamma
+            offset = 0.5 * (alpha - gamma) / denom if denom != 0 else 0
+            freq_reverbacao = freq_r_pos[idx_pk_r] + offset * (freq_r_pos[1] - freq_r_pos[0])
+        else:
+            freq_reverbacao = freq_r_pos[idx_pk_r]
+    else:
+        freq_reverbacao = 0
 
     return {
-        "RMS (mV)":                  round(rms, 4),
-        "Pico (mV)":                 round(pico, 4),
-        "Energia (mV²·s)":           round(energia, 6),
-        "Duration (µs)":             round(duration_us, 2),
-        "Rise Time (µs)":            round(rise_time_us, 2),
-        "Counts":                    counts,
-        "Counts to Peak":            counts_to_peak,
-        "RA Value (µs/mV)":          round(ra_value, 4),
-        "Zero Crossings":            zc,
-        "Freq. Centroide (Hz)":      round(freq_centroide, 2),
-        "Freq. Pico (Hz)":           round(freq_pico, 2),
-        "ZCR (Hz)":                  round(zcr, 2),
-        "Amp. Não-Dimensional":      round(amp_nd, 4),
-        "Partial Power (banda)":     round(partial_power, 6),
-        "Freq. Iniciação (Hz)":      round(freq_iniciacao, 2),
-        "Freq. Reverberação (Hz)":   round(freq_reverbacao, 2),
-        "Freq. Pico Ponderada (Hz)": round(freq_pico_pond, 2),
+        "RMS (mV)":                    round(rms, 4),
+        "Pico (mV)":                   round(pico, 4),
+        "Energia (mV²·s)":             round(energia, 6),
+        "Duration (µs)":               round(duration_us, 2),
+        "Rise Time (µs)":              round(rise_time_us, 2),
+        "Temporal Centroid (µs)":      round(temporal_centroid_us, 2),
+        "Counts":                      counts,
+        "Counts to Peak":              counts_to_peak,
+        "RA Value (µs/mV)":            round(ra_value, 4),
+        "Zero Crossings":              zc,
+        "Freq. Centroide (Hz)":        round(freq_centroide, 2),
+        "Freq. Pico (Hz)":             round(freq_pico, 2),
+        "Average Frequency (Hz)":      round(avg_frequency, 2),
+        "Spectral Spread (Hz)":        round(spectral_spread, 2),
+        "Roll-on Frequency (Hz)":      round(freq_rollon, 2),
+        "Roll-off Frequency (Hz)":     round(freq_rolloff, 2),
+        "ZCR (Hz)":                    round(zcr, 2),
+        "Amp. Não-Dimensional":        round(amp_nd, 4),
+        "Partial Power (banda)":       round(partial_power, 6),
+        "Freq. Iniciação (Hz)":        round(freq_iniciacao, 2),
+        "Freq. Reverberação (Hz)":     round(freq_reverbacao, 2),
+        "Freq. Pico Ponderada (Hz)":   round(freq_pico_pond, 2),
     }
 
 
 # ============================================================
 # FUNÇÃO: CALCULAR AMORTECIMENTO LOGARÍTMICO
-# ζ próximo de 0 → pouco amortecimento; próximo de 1 → muito amortecido
 # ============================================================
 def calcular_amortecimento(dados, fs):
     picos, _ = signal.find_peaks(dados)
@@ -250,7 +319,7 @@ if not subpastas:
     st.stop()
 
 # ============================================================
-# SIDEBAR — ordem: Modo → Experimento → Par → Parâmetros
+# SIDEBAR
 # ============================================================
 modo = st.sidebar.radio("Selecione o Modo:", [
     "🔬 Visão Detalhada",
@@ -260,14 +329,12 @@ modo = st.sidebar.radio("Selecione o Modo:", [
 
 st.sidebar.markdown("---")
 
-# Seletor de experimento sempre visível no topo
 material = st.sidebar.selectbox("Selecione o Experimento:", subpastas)
 pasta_material = os.path.join(PASTA_RAIZ, material)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ Parâmetros de Análise")
 
-# Threshold em mV
 threshold_mv = st.sidebar.number_input(
     "Threshold (mV)", min_value=0.01, max_value=100.0, value=0.5, step=0.1
 )
@@ -275,7 +342,6 @@ threshold_mv = st.sidebar.number_input(
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔊 Velocidade de Propagação")
 
-# Velocidade por material para cálculo de distância via ToA: d = v × Δt
 vel_propagacao = {}
 for pasta in subpastas:
     vel_propagacao[pasta] = st.sidebar.number_input(
@@ -286,7 +352,6 @@ for pasta in subpastas:
         step=100
     )
 
-# Botão de logout
 st.sidebar.markdown("---")
 if st.sidebar.button("🚪 Sair"):
     st.session_state["autenticado"] = False
@@ -295,13 +360,9 @@ if st.sidebar.button("🚪 Sair"):
 
 # ============================================================
 # MODO 1: VISÃO DETALHADA
-# Analisa um par (Canal 1 + Canal 2) por vez
 # ============================================================
 if modo == "🔬 Visão Detalhada":
 
-    # Busca e organiza pares de arquivos
-    # Lógica: último dígito do nome = canal (1 ou 2)
-    #         tudo antes = chave do par (ex: "3" para 31.txt e 32.txt)
     arquivos = sorted([f for f in os.listdir(pasta_material) if f.endswith(".txt")])
     pares = {}
     for arq in arquivos:
@@ -319,12 +380,10 @@ if modo == "🔬 Visão Detalhada":
         st.warning("Nenhum par de arquivos encontrado.")
         st.stop()
 
-    # Ordenação numérica correta: 1, 2, 3 ... 10, 11 (não 1, 10, 11, 2)
     pares_ordenados = sorted(pares.keys(), key=lambda x: int(x) if x.isdigit() else x)
     par_sel = st.sidebar.selectbox("Selecione o Par:", pares_ordenados)
     par = pares[par_sel]
 
-    # Leitura dos dois canais
     arq_c1 = os.path.join(pasta_material, par.get("c1", ""))
     arq_c2 = os.path.join(pasta_material, par.get("c2", ""))
     fs1, dados1, meta1 = ler_txt_vallen(arq_c1)
@@ -332,8 +391,7 @@ if modo == "🔬 Visão Detalhada":
 
     st.subheader(f"📂 {material} — Par {par_sel}")
 
-    # ---- CÁLCULO DO ToA (Time of Arrival) ----
-    # Δt entre os dois canais → estima localização da fonte de emissão
+    # ToA
     if "time_raw" in meta1 and "time_raw" in meta2:
         t1 = parse_tempo(meta1["time_raw"])
         t2 = parse_tempo(meta2["time_raw"])
@@ -350,7 +408,6 @@ if modo == "🔬 Visão Detalhada":
                     f"*(velocidade configurada: {vel} m/s)*"
                 )
 
-    # ---- GRÁFICOS E TABELAS ----
     col1, col2 = st.columns(2)
 
     for col, dados, fs, meta, label in [
@@ -364,11 +421,10 @@ if modo == "🔬 Visão Detalhada":
         with col:
             st.markdown(f"**{label}** | fs = {fs:.0f} Hz | {len(dados)} amostras | Unidade: mV")
 
-            t_eixo = np.arange(len(dados)) / fs * 1e6  # tempo em µs
+            t_eixo = np.arange(len(dados)) / fs * 1e6
 
             fig, axes = plt.subplots(2, 1, figsize=(6, 5))
 
-            # Sinal no tempo
             axes[0].plot(t_eixo, dados, color="steelblue", linewidth=0.8)
             axes[0].axhline(threshold_mv, color="red", linestyle="--",
                             linewidth=0.8, label=f"Threshold ({threshold_mv} mV)")
@@ -379,7 +435,6 @@ if modo == "🔬 Visão Detalhada":
             axes[0].legend(fontsize=7)
             axes[0].grid(True, alpha=0.3)
 
-            # Espectro de frequências (FFT)
             n = len(dados)
             freqs = fftfreq(n, d=1 / fs)
             espectro = np.abs(fft(dados))
@@ -396,8 +451,8 @@ if modo == "🔬 Visão Detalhada":
             st.pyplot(fig)
             plt.close()
 
-            # Tabela de features
-            features = calcular_features(dados, fs, threshold_mv)
+            pretrigger = meta.get("pretrigger", 0)
+            features = calcular_features(dados, fs, threshold_mv, pretrigger)
             amort = calcular_amortecimento(dados, fs)
             features["Amortecimento (ζ)"] = amort
 
@@ -407,7 +462,6 @@ if modo == "🔬 Visão Detalhada":
 
 # ============================================================
 # MODO 2: COMPARAÇÃO ENTRE MATERIAIS
-# Mostra médias das features de cada material lado a lado
 # ============================================================
 elif modo == "🆚 Comparação":
     st.subheader("🆚 Comparação Estatística entre Materiais")
@@ -423,7 +477,8 @@ elif modo == "🆚 Comparação":
             if arq.endswith(".txt"):
                 fs, dados, meta = ler_txt_vallen(os.path.join(pasta_mat, arq))
                 if dados is not None and len(dados) > 0:
-                    feat = calcular_features(dados, fs, threshold_mv)
+                    pretrigger = meta.get("pretrigger", 0)
+                    feat = calcular_features(dados, fs, threshold_mv, pretrigger)
                     feat["Amortecimento (ζ)"] = calcular_amortecimento(dados, fs)
                     todas_features.append(feat)
 
@@ -454,8 +509,7 @@ elif modo == "🆚 Comparação":
 
 # ============================================================
 # MODO 3: BIBLIOTECA DE SINAIS
-# Dataset completo com todas as features de todos os arquivos
-# Exportável como CSV para uso em machine learning
+# CORREÇÃO: adicionada distância estimada de cada sensor (d = v × Δt / 2)
 # ============================================================
 elif modo == "📚 Biblioteca de Sinais":
     st.subheader("📚 Biblioteca de Sinais — Dataset Completo")
@@ -468,40 +522,75 @@ elif modo == "📚 Biblioteca de Sinais":
 
     for pasta in subpastas:
         pasta_mat = os.path.join(PASTA_RAIZ, pasta)
-        arquivos = sorted(os.listdir(pasta_mat))
+        arquivos_txt = sorted([f for f in os.listdir(pasta_mat) if f.endswith(".txt")])
 
-        for arq in arquivos:
-            if arq.endswith(".txt"):
+        # Organiza pares para calcular ToA e distância por sensor
+        pares_bib = {}
+        for arq in arquivos_txt:
+            nome = os.path.splitext(arq)[0]
+            if len(nome) >= 2:
+                ultimo = nome[-1]
+                chave = nome[:-1]
+                pares_bib.setdefault(chave, {})
+                if ultimo == "1":
+                    pares_bib[chave]["c1"] = arq
+                elif ultimo == "2":
+                    pares_bib[chave]["c2"] = arq
+
+        vel = vel_propagacao.get(pasta, 2000)
+
+        for chave, par in pares_bib.items():
+            for canal_key, label_canal in [("c1", 1), ("c2", 2)]:
+                arq = par.get(canal_key)
+                if not arq:
+                    continue
                 caminho = os.path.join(pasta_mat, arq)
                 fs, dados, meta = ler_txt_vallen(caminho)
-                if dados is not None and len(dados) > 0:
-                    feat = calcular_features(dados, fs, threshold_mv)
-                    feat["Amortecimento (ζ)"] = calcular_amortecimento(dados, fs)
-                    feat["Material"] = pasta
-                    feat["Arquivo"] = arq
-                    feat["Canal"] = meta.get("channel", "?")
-                    feat["Tempo (raw)"] = meta.get("time_raw", "?")
-                    feat["fs (Hz)"] = fs
-                    registros.append(feat)
+                if dados is None or len(dados) == 0:
+                    continue
+
+                pretrigger = meta.get("pretrigger", 0)
+                feat = calcular_features(dados, fs, threshold_mv, pretrigger)
+                feat["Amortecimento (ζ)"] = calcular_amortecimento(dados, fs)
+
+                # Distância estimada do sensor: usa ToA do par
+                # d_sensor = v × Δt / 2 (metade da distância total entre sensores)
+                dist_sensor = None
+                outro_key = "c2" if canal_key == "c1" else "c1"
+                outro_arq = par.get(outro_key)
+                if outro_arq:
+                    _, _, meta_outro = ler_txt_vallen(os.path.join(pasta_mat, outro_arq))
+                    t_self  = parse_tempo(meta.get("time_raw", ""))
+                    t_outro = parse_tempo(meta_outro.get("time_raw", ""))
+                    if t_self is not None and t_outro is not None:
+                        delta_t = abs(t_self - t_outro)
+                        # Distância estimada até a fonte (assumindo fonte entre os dois sensores)
+                        dist_sensor = round(delta_t * vel * 100 / 2, 4)  # em cm
+
+                feat["Material"]              = pasta
+                feat["Arquivo"]               = arq
+                feat["Canal"]                 = label_canal
+                feat["Tempo (raw)"]           = meta.get("time_raw", "?")
+                feat["fs (Hz)"]               = fs
+                feat["Dist. Estimada (cm)"]   = dist_sensor if dist_sensor is not None else "N/A"
+                registros.append(feat)
 
     if registros:
         df_lib = pd.DataFrame(registros)
 
-        # Reordena: identificação primeiro, depois features
-        cols_info = ["Material", "Arquivo", "Canal", "Tempo (raw)", "fs (Hz)"]
+        cols_info = ["Material", "Arquivo", "Canal", "Tempo (raw)", "fs (Hz)", "Dist. Estimada (cm)"]
         cols_feat = [c for c in df_lib.columns if c not in cols_info]
         df_lib = df_lib[cols_info + cols_feat]
 
         st.dataframe(df_lib, use_container_width=True)
 
-        # Estatísticas por material
         st.markdown("### 📈 Estatísticas por Material")
+        cols_num = [c for c in cols_feat if df_lib[c].dtype != object]
         st.dataframe(
-            df_lib.groupby("Material")[cols_feat].agg(["mean", "std"]).round(4),
+            df_lib.groupby("Material")[cols_num].agg(["mean", "std"]).round(4),
             use_container_width=True
         )
 
-        # Exportar CSV
         csv = df_lib.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="⬇️ Exportar Dataset (CSV)",
