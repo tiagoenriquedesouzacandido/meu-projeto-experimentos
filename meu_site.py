@@ -13,7 +13,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import StratifiedKFold, cross_validate, cross_val_predict
+from sklearn.model_selection import StratifiedGroupKFold, cross_validate, cross_val_predict
 from sklearn.metrics import confusion_matrix
 
 # ============================================================
@@ -622,12 +622,14 @@ elif modo == "📚 Biblioteca de Sinais":
 # ============================================================
 # MODO 4: MACHINE LEARNING (Prova de Conceito)
 # Classifica o MATERIAL a partir dos parâmetros de EA
+# Validação: StratifiedGroupKFold (sinais da mesma aquisição ficam juntos)
 # ============================================================
 elif modo == "🤖 Machine Learning":
     st.subheader("🤖 Machine Learning — Classificação de Materiais (PoC)")
     st.markdown(
         "Prova de conceito: os modelos tentam identificar o **material** de origem de cada sinal "
-        "a partir dos parâmetros de EA extraídos. Validação cruzada estratificada (5 folds)."
+        "a partir dos parâmetros de EA extraídos. Validação cruzada **agrupada e estratificada**: "
+        "os dois canais de uma mesma aquisição nunca ficam um no treino e outro no teste."
     )
 
     if st.button("Treinar e Avaliar Modelos de ML"):
@@ -641,23 +643,46 @@ elif modo == "🤖 Machine Learning":
         X = X.apply(pd.to_numeric, errors="coerce")
         X = X.replace([np.inf, -np.inf], np.nan)   # infinitos viram nulos → mediana no Pipeline
 
-        # --- Checagem de segurança para o StratifiedKFold ---
+        # --- Grupos: sinais da mesma aquisição (par canal 1 + canal 2) ficam juntos ---
+        # Grupo = "Material|nome do arquivo sem o último dígito (1 ou 2)"
+        # (mesma regra de pares que o app já usa nos outros modos)
+        def chave_aquisicao(material_, arquivo_):
+            nome = os.path.splitext(arquivo_)[0]
+            if len(nome) >= 2 and nome[-1] in ("1", "2"):
+                base = nome[:-1]
+            else:
+                base = nome
+            return f"{material_}|{base}"
+
+        grupos = np.array([chave_aquisicao(m, a)
+                           for m, a in zip(df_ml["Material"], df_ml["Arquivo"])])
+
         contagem = y.value_counts()
+        grupos_por_material = pd.Series(grupos).groupby(y.values).nunique()
+
         if y.nunique() < 2:
             st.error("É preciso ter pelo menos 2 materiais para classificar.")
             st.stop()
-        n_splits = int(min(5, contagem.min()))
+
+        # nº de divisões limitado pelo material com menos grupos (aquisições)
+        n_splits = int(min(5, grupos_por_material.min()))
         if n_splits < 2:
-            st.error(f"Algum material tem só 1 sinal. Contagem atual:\n{contagem.to_string()}")
+            st.error("Algum material tem só 1 aquisição (grupo); a validação agrupada "
+                     f"não é possível. Grupos por material:\n{grupos_por_material.to_string()}")
             st.stop()
         if n_splits < 5:
-            st.warning(f"Há material com apenas {contagem.min()} sinais; "
-                       f"usando {n_splits} folds em vez de 5.")
+            st.warning(f"Há material com apenas {grupos_por_material.min()} aquisições; "
+                       f"usando {n_splits} divisões em vez de 5.")
 
-        st.info(f"📊 {len(X)} sinais | {X.shape[1]} atributos | {y.nunique()} materiais")
-        st.dataframe(contagem.rename("Nº de sinais"), use_container_width=True)
+        st.info(f"📊 {len(X)} sinais | {len(set(grupos))} aquisições (grupos) | "
+                f"{X.shape[1]} atributos | {y.nunique()} materiais | "
+                f"{n_splits} divisões na validação")
+        st.dataframe(pd.DataFrame({"Nº de sinais": contagem,
+                                   "Nº de aquisições": grupos_por_material}),
+                     use_container_width=True)
 
-        # --- Modelos (imputação pela mediana + StandardScaler dentro do Pipeline) ---
+        # --- Modelos (imputação pela mediana + StandardScaler dentro do Pipeline,
+        #     assim o pré-processamento é ajustado só com dados de treino em cada divisão) ---
         modelos = {
             "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42),
             "SVM (RBF)":     SVC(kernel="rbf", C=1.0),
@@ -671,12 +696,25 @@ elif modo == "🤖 Machine Learning":
                 ("modelo", modelo),
             ])
 
-        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        # Validação agrupada e estratificada (nenhum grupo aparece em treino e teste ao mesmo tempo)
+        cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+        # Confere se cada divisão é válida (todas as classes no treino; avisa se faltar no teste)
+        todas = set(y.unique())
+        for k, (tr, te) in enumerate(cv.split(X, y, groups=grupos), 1):
+            if set(y.iloc[tr].unique()) != todas:
+                st.error(f"Divisão {k}: treino sem algum material. "
+                         "Não há grupos suficientes para essa validação.")
+                st.stop()
+            ausentes = todas - set(y.iloc[te].unique())
+            if ausentes:
+                st.warning(f"Divisão {k}: materiais ausentes no teste: {sorted(ausentes)}. "
+                           "O F1 macro dessa divisão fica menos confiável.")
 
         # --- Validação cruzada ---
         resultados = []
         for nome, modelo in modelos.items():
-            sc = cross_validate(criar_pipe(modelo), X, y, cv=cv,
+            sc = cross_validate(criar_pipe(modelo), X, y, cv=cv, groups=grupos,
                                 scoring=["accuracy", "f1_macro"])
             resultados.append({
                 "Modelo": nome,
@@ -685,14 +723,15 @@ elif modo == "🤖 Machine Learning":
                 "F1-Score Macro": round(sc["test_f1_macro"].mean(), 4),
             })
 
-        st.markdown("### 📋 Desempenho dos Modelos (validação cruzada)")
+        st.markdown("### 📋 Desempenho dos Modelos (validação cruzada agrupada)")
         df_res = pd.DataFrame(resultados)
         st.dataframe(df_res, use_container_width=True)
         for r in resultados:
             st.write(f"**{r['Modelo']}** — Acurácia: {r['Acurácia Média']*100:.1f}% "
                      f"(± {r['Desvio Padrão (±)']*100:.1f}%) | F1 macro: {r['F1-Score Macro']:.3f}")
 
-        # --- Gráfico A: Top 10 importâncias (Random Forest) ---
+        # --- Gráfico A: Top 10 importâncias (Random Forest treinado com todos os dados;
+        #     gráfico descritivo, não entra em nenhuma métrica) ---
         pipe_rf = criar_pipe(RandomForestClassifier(n_estimators=100, random_state=42))
         pipe_rf.fit(X, y)
         importancias = pd.Series(
@@ -709,9 +748,10 @@ elif modo == "🤖 Machine Learning":
         st.pyplot(fig1)
         plt.close()
 
-        # --- Gráfico B: Matriz de confusão (predições out-of-fold) ---
+        # --- Gráfico B: Matriz de confusão (predições out-of-fold, mesma validação agrupada) ---
         y_pred = cross_val_predict(
-            criar_pipe(RandomForestClassifier(n_estimators=100, random_state=42)), X, y, cv=cv
+            criar_pipe(RandomForestClassifier(n_estimators=100, random_state=42)),
+            X, y, cv=cv, groups=grupos
         )
         classes = sorted(y.unique())
         cm = confusion_matrix(y, y_pred, labels=classes)
@@ -725,7 +765,7 @@ elif modo == "🤖 Machine Learning":
         ax2.set_yticklabels(classes)
         ax2.set_xlabel("Material previsto")
         ax2.set_ylabel("Material real")
-        ax2.set_title("Matriz de Confusão (validação cruzada)")
+        ax2.set_title("Matriz de Confusão (validação cruzada agrupada)")
         limite = cm.max() / 2 if cm.max() > 0 else 0
         for i in range(len(classes)):
             for j in range(len(classes)):
