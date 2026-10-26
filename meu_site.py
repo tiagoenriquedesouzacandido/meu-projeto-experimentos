@@ -6,6 +6,16 @@ from scipy import signal
 from scipy.fft import fft, fftfreq
 import pandas as pd
 
+# --- Machine Learning (scikit-learn) ---
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import StratifiedKFold, cross_validate, cross_val_predict
+from sklearn.metrics import confusion_matrix
+
 # ============================================================
 # SISTEMA DE LOGIN — PROTEÇÃO DOS DADOS NÃO PUBLICADOS
 # ============================================================
@@ -106,10 +116,6 @@ def parse_tempo(time_raw):
 
 # ============================================================
 # FUNÇÃO: CALCULAR FEATURES TEMPORAIS E ESPECTRAIS
-# CORREÇÕES:
-#   - Rise Time: descontado o pretrigger para medir a partir do trigger real
-#   - Freq. Iniciação/Reverberação: interpolação parabólica para maior precisão
-#   - Adicionadas: Temporal Centroid, Average Frequency, Roll-on, Roll-off, Spectral Spread
 # ============================================================
 def calcular_features(dados, fs, threshold_mv=0.5, pretrigger=0):
     n = len(dados)
@@ -120,27 +126,25 @@ def calcular_features(dados, fs, threshold_mv=0.5, pretrigger=0):
     t = np.arange(n) * dt
 
     # --- FEATURES TEMPORAIS ---
-
     rms = np.sqrt(np.mean(dados**2))
     pico = np.max(np.abs(dados))
     energia = np.sum(dados**2) * dt
     duration_us = n * dt * 1e6
 
-    # Rise Time corrigido: tempo desde o trigger (descontando pretrigger) até o pico
+    # Rise Time: tempo do trigger (descontando pretrigger) até o pico
     idx_pico = np.argmax(np.abs(dados))
     idx_trigger = pretrigger if pretrigger > 0 else 0
     rise_samples = max(idx_pico - idx_trigger, 0)
     rise_time_us = rise_samples * dt * 1e6
 
     # Temporal Centroid: centro de massa temporal ponderado pela energia
-    # Indica quando ocorre a maior concentração de energia no tempo
     energia_t = dados**2
     if np.sum(energia_t) > 0:
         temporal_centroid_us = np.sum(t * energia_t) / np.sum(energia_t) * 1e6
     else:
         temporal_centroid_us = 0.0
 
-    # Counts: cruzamentos positivos do threshold
+    # Counts: cruzamentos ascendentes do threshold
     acima = dados > threshold_mv
     counts = int(np.sum(np.diff(acima.astype(int)) == 1))
 
@@ -160,28 +164,25 @@ def calcular_features(dados, fs, threshold_mv=0.5, pretrigger=0):
     freqs_pos = freqs[:n // 2]
     espectro_pos = espectro[:n // 2]
     pot_espectro = espectro_pos**2
-
     pot_total = np.sum(pot_espectro)
 
     # Frequência de Pico
     idx_max_freq = np.argmax(espectro_pos)
     freq_pico = freqs_pos[idx_max_freq]
 
-    # Frequência Centroide (1ª ordem)
+    # Frequência Centroide
     if np.sum(espectro_pos) > 0:
         freq_centroide = np.sum(freqs_pos * espectro_pos) / np.sum(espectro_pos)
     else:
         freq_centroide = 0
 
-    # Average Frequency: média ponderada pela potência (espectro²)
-    # Diferente do centroide que usa amplitude; aqui usa potência
+    # Average Frequency (ponderada pela potência)
     if pot_total > 0:
         avg_frequency = np.sum(freqs_pos * pot_espectro) / pot_total
     else:
         avg_frequency = 0
 
-    # Spectral Spread: desvio padrão espectral em torno da freq. centroide
-    # Mede a largura de banda do sinal
+    # Spectral Spread
     if np.sum(espectro_pos) > 0:
         spectral_spread = np.sqrt(
             np.sum(((freqs_pos - freq_centroide)**2) * espectro_pos) / np.sum(espectro_pos)
@@ -189,22 +190,18 @@ def calcular_features(dados, fs, threshold_mv=0.5, pretrigger=0):
     else:
         spectral_spread = 0
 
-    # Roll-on Frequency: frequência onde acumula 15% da energia espectral total
-    # Indica onde o sinal começa a ter energia significativa
+    # Roll-on (15%) e Roll-off (85%) da energia espectral acumulada
     energia_acum = np.cumsum(pot_espectro)
     energia_total_acum = energia_acum[-1] if energia_acum[-1] > 0 else 1
     idx_rollon = np.searchsorted(energia_acum, 0.15 * energia_total_acum)
     freq_rollon = freqs_pos[idx_rollon] if idx_rollon < len(freqs_pos) else 0
-
-    # Roll-off Frequency: frequência onde acumula 85% da energia espectral total
-    # Indica onde o sinal perde energia significativa
     idx_rolloff = np.searchsorted(energia_acum, 0.85 * energia_total_acum)
     freq_rolloff = freqs_pos[idx_rolloff] if idx_rolloff < len(freqs_pos) else 0
 
     # ZCR
     zcr = zc / (n * dt)
 
-    # Amp. Não-Dimensional
+    # Amplitude Não-Dimensional
     amp_nd = pico / rms if rms > 0 else 0
 
     # Partial Power (banda 1–5 kHz)
@@ -214,10 +211,9 @@ def calcular_features(dados, fs, threshold_mv=0.5, pretrigger=0):
     partial_power = pot_banda / pot_total if pot_total > 0 else 0
 
     # Freq. Pico Ponderada
-    freq_pico_pond = avg_frequency  # equivalente à média ponderada pela potência
+    freq_pico_pond = avg_frequency
 
-    # Frequência de Iniciação: freq. dominante no 1º quarto do sinal
-    # CORREÇÃO: usa interpolação parabólica para maior precisão
+    # Frequência de Iniciação (1º quarto) com interpolação parabólica
     quarto = max(n // 4, 16)
     trecho_inicio = dados[:quarto]
     esp_inicio = np.abs(fft(trecho_inicio))
@@ -227,12 +223,11 @@ def calcular_features(dados, fs, threshold_mv=0.5, pretrigger=0):
     freq_i_pos = freq_inicio_arr[mask_pos]
     if len(esp_i_pos) > 2:
         idx_pk = np.argmax(esp_i_pos)
-        # Interpolação parabólica para refinar a frequência de pico
         if 0 < idx_pk < len(esp_i_pos) - 1:
             alpha = esp_i_pos[idx_pk - 1]
-            beta  = esp_i_pos[idx_pk]
+            beta = esp_i_pos[idx_pk]
             gamma = esp_i_pos[idx_pk + 1]
-            denom = alpha - 2*beta + gamma
+            denom = alpha - 2 * beta + gamma
             offset = 0.5 * (alpha - gamma) / denom if denom != 0 else 0
             freq_iniciacao = freq_i_pos[idx_pk] + offset * (freq_i_pos[1] - freq_i_pos[0])
         else:
@@ -240,7 +235,7 @@ def calcular_features(dados, fs, threshold_mv=0.5, pretrigger=0):
     else:
         freq_iniciacao = 0
 
-    # Frequência de Reverberação: freq. dominante no último quarto do sinal
+    # Frequência de Reverberação (último quarto) com interpolação parabólica
     trecho_rev = dados[-quarto:]
     esp_rev = np.abs(fft(trecho_rev))
     freq_rev_arr = fftfreq(len(trecho_rev), d=dt)
@@ -251,9 +246,9 @@ def calcular_features(dados, fs, threshold_mv=0.5, pretrigger=0):
         idx_pk_r = np.argmax(esp_r_pos)
         if 0 < idx_pk_r < len(esp_r_pos) - 1:
             alpha = esp_r_pos[idx_pk_r - 1]
-            beta  = esp_r_pos[idx_pk_r]
+            beta = esp_r_pos[idx_pk_r]
             gamma = esp_r_pos[idx_pk_r + 1]
-            denom = alpha - 2*beta + gamma
+            denom = alpha - 2 * beta + gamma
             offset = 0.5 * (alpha - gamma) / denom if denom != 0 else 0
             freq_reverbacao = freq_r_pos[idx_pk_r] + offset * (freq_r_pos[1] - freq_r_pos[0])
         else:
@@ -303,6 +298,29 @@ def calcular_amortecimento(dados, fs):
 
 
 # ============================================================
+# FUNÇÃO: MONTA A TABELA DE FEATURES DE TODOS OS SINAIS (para o ML)
+# Mesma lógica da Biblioteca de Sinais; fica em cache para não recalcular
+# ============================================================
+@st.cache_data(show_spinner="Calculando features de todos os sinais...")
+def montar_dataset_ml(pasta_raiz, lista_materiais, threshold):
+    registros = []
+    for pasta in lista_materiais:
+        pasta_mat = os.path.join(pasta_raiz, pasta)
+        for arq in sorted(os.listdir(pasta_mat)):
+            if not arq.endswith(".txt"):
+                continue
+            fs, dados, meta = ler_txt_vallen(os.path.join(pasta_mat, arq))
+            if dados is None or len(dados) == 0:
+                continue
+            feat = calcular_features(dados, fs, threshold, meta.get("pretrigger", 0))
+            feat["Amortecimento (ζ)"] = calcular_amortecimento(dados, fs)
+            feat["Material"] = pasta
+            feat["Arquivo"] = arq
+            registros.append(feat)
+    return pd.DataFrame(registros)
+
+
+# ============================================================
 # INÍCIO DA INTERFACE
 # ============================================================
 if not os.path.exists(PASTA_RAIZ):
@@ -324,7 +342,8 @@ if not subpastas:
 modo = st.sidebar.radio("Selecione o Modo:", [
     "🔬 Visão Detalhada",
     "🆚 Comparação",
-    "📚 Biblioteca de Sinais"
+    "📚 Biblioteca de Sinais",
+    "🤖 Machine Learning"
 ])
 
 st.sidebar.markdown("---")
@@ -509,7 +528,6 @@ elif modo == "🆚 Comparação":
 
 # ============================================================
 # MODO 3: BIBLIOTECA DE SINAIS
-# CORREÇÃO: adicionada distância estimada de cada sensor (d = v × Δt / 2)
 # ============================================================
 elif modo == "📚 Biblioteca de Sinais":
     st.subheader("📚 Biblioteca de Sinais — Dataset Completo")
@@ -524,7 +542,6 @@ elif modo == "📚 Biblioteca de Sinais":
         pasta_mat = os.path.join(PASTA_RAIZ, pasta)
         arquivos_txt = sorted([f for f in os.listdir(pasta_mat) if f.endswith(".txt")])
 
-        # Organiza pares para calcular ToA e distância por sensor
         pares_bib = {}
         for arq in arquivos_txt:
             nome = os.path.splitext(arq)[0]
@@ -553,26 +570,24 @@ elif modo == "📚 Biblioteca de Sinais":
                 feat = calcular_features(dados, fs, threshold_mv, pretrigger)
                 feat["Amortecimento (ζ)"] = calcular_amortecimento(dados, fs)
 
-                # Distância estimada do sensor: usa ToA do par
-                # d_sensor = v × Δt / 2 (metade da distância total entre sensores)
+                # Distância estimada do sensor via ToA do par: d = v × Δt / 2
                 dist_sensor = None
                 outro_key = "c2" if canal_key == "c1" else "c1"
                 outro_arq = par.get(outro_key)
                 if outro_arq:
                     _, _, meta_outro = ler_txt_vallen(os.path.join(pasta_mat, outro_arq))
-                    t_self  = parse_tempo(meta.get("time_raw", ""))
+                    t_self = parse_tempo(meta.get("time_raw", ""))
                     t_outro = parse_tempo(meta_outro.get("time_raw", ""))
                     if t_self is not None and t_outro is not None:
                         delta_t = abs(t_self - t_outro)
-                        # Distância estimada até a fonte (assumindo fonte entre os dois sensores)
-                        dist_sensor = round(delta_t * vel * 100 / 2, 4)  # em cm
+                        dist_sensor = round(delta_t * vel * 100 / 2, 4)  # cm
 
-                feat["Material"]              = pasta
-                feat["Arquivo"]               = arq
-                feat["Canal"]                 = label_canal
-                feat["Tempo (raw)"]           = meta.get("time_raw", "?")
-                feat["fs (Hz)"]               = fs
-                feat["Dist. Estimada (cm)"]   = dist_sensor if dist_sensor is not None else "N/A"
+                feat["Material"] = pasta
+                feat["Arquivo"] = arq
+                feat["Canal"] = label_canal
+                feat["Tempo (raw)"] = meta.get("time_raw", "?")
+                feat["fs (Hz)"] = fs
+                feat["Dist. Estimada (cm)"] = dist_sensor if dist_sensor is not None else "N/A"
                 registros.append(feat)
 
     if registros:
@@ -602,3 +617,123 @@ elif modo == "📚 Biblioteca de Sinais":
         st.success(f"✅ {len(registros)} sinais carregados na biblioteca.")
     else:
         st.warning("Nenhum sinal encontrado na pasta de experimentos.")
+
+
+# ============================================================
+# MODO 4: MACHINE LEARNING (Prova de Conceito)
+# Classifica o MATERIAL a partir dos parâmetros de EA
+# ============================================================
+elif modo == "🤖 Machine Learning":
+    st.subheader("🤖 Machine Learning — Classificação de Materiais (PoC)")
+    st.markdown(
+        "Prova de conceito: os modelos tentam identificar o **material** de origem de cada sinal "
+        "a partir dos parâmetros de EA extraídos. Validação cruzada estratificada (5 folds)."
+    )
+
+    if st.button("Treinar e Avaliar Modelos de ML"):
+        df_ml = montar_dataset_ml(PASTA_RAIZ, subpastas, threshold_mv)
+
+        # --- Colunas removidas (não são parâmetros de EA) ---
+        cols_remover = ["Material", "Arquivo", "Canal", "Tempo (raw)", "fs (Hz)",
+                        "Duração (µs)", "Duration (µs)", "Dist. Estimada (cm)"]
+        y = df_ml["Material"]
+        X = df_ml.drop(columns=[c for c in cols_remover if c in df_ml.columns])
+        X = X.apply(pd.to_numeric, errors="coerce")
+        X = X.replace([np.inf, -np.inf], np.nan)   # infinitos viram nulos → mediana no Pipeline
+
+        # --- Checagem de segurança para o StratifiedKFold ---
+        contagem = y.value_counts()
+        if y.nunique() < 2:
+            st.error("É preciso ter pelo menos 2 materiais para classificar.")
+            st.stop()
+        n_splits = int(min(5, contagem.min()))
+        if n_splits < 2:
+            st.error(f"Algum material tem só 1 sinal. Contagem atual:\n{contagem.to_string()}")
+            st.stop()
+        if n_splits < 5:
+            st.warning(f"Há material com apenas {contagem.min()} sinais; "
+                       f"usando {n_splits} folds em vez de 5.")
+
+        st.info(f"📊 {len(X)} sinais | {X.shape[1]} atributos | {y.nunique()} materiais")
+        st.dataframe(contagem.rename("Nº de sinais"), use_container_width=True)
+
+        # --- Modelos (imputação pela mediana + StandardScaler dentro do Pipeline) ---
+        modelos = {
+            "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42),
+            "SVM (RBF)":     SVC(kernel="rbf", C=1.0),
+            "k-NN (k=5)":    KNeighborsClassifier(n_neighbors=5),
+        }
+
+        def criar_pipe(modelo):
+            return Pipeline([
+                ("imputer", SimpleImputer(strategy="median")),
+                ("scaler", StandardScaler()),
+                ("modelo", modelo),
+            ])
+
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+        # --- Validação cruzada ---
+        resultados = []
+        for nome, modelo in modelos.items():
+            sc = cross_validate(criar_pipe(modelo), X, y, cv=cv,
+                                scoring=["accuracy", "f1_macro"])
+            resultados.append({
+                "Modelo": nome,
+                "Acurácia Média": round(sc["test_accuracy"].mean(), 4),
+                "Desvio Padrão (±)": round(sc["test_accuracy"].std(), 4),
+                "F1-Score Macro": round(sc["test_f1_macro"].mean(), 4),
+            })
+
+        st.markdown("### 📋 Desempenho dos Modelos (validação cruzada)")
+        df_res = pd.DataFrame(resultados)
+        st.dataframe(df_res, use_container_width=True)
+        for r in resultados:
+            st.write(f"**{r['Modelo']}** — Acurácia: {r['Acurácia Média']*100:.1f}% "
+                     f"(± {r['Desvio Padrão (±)']*100:.1f}%) | F1 macro: {r['F1-Score Macro']:.3f}")
+
+        # --- Gráfico A: Top 10 importâncias (Random Forest) ---
+        pipe_rf = criar_pipe(RandomForestClassifier(n_estimators=100, random_state=42))
+        pipe_rf.fit(X, y)
+        importancias = pd.Series(
+            pipe_rf.named_steps["modelo"].feature_importances_, index=X.columns
+        ).sort_values(ascending=False).head(10)[::-1]
+
+        st.markdown("### 🌲 Top 10 Atributos Mais Importantes (Random Forest)")
+        fig1, ax1 = plt.subplots(figsize=(8, 4.5))
+        ax1.barh(importancias.index, importancias.values, color="steelblue", edgecolor="black")
+        ax1.set_xlabel("Importância (Gini)")
+        ax1.set_title("Top 10 Atributos — Random Forest")
+        ax1.grid(True, axis="x", alpha=0.3)
+        plt.tight_layout()
+        st.pyplot(fig1)
+        plt.close()
+
+        # --- Gráfico B: Matriz de confusão (predições out-of-fold) ---
+        y_pred = cross_val_predict(
+            criar_pipe(RandomForestClassifier(n_estimators=100, random_state=42)), X, y, cv=cv
+        )
+        classes = sorted(y.unique())
+        cm = confusion_matrix(y, y_pred, labels=classes)
+
+        st.markdown("### 🔥 Matriz de Confusão — Random Forest")
+        fig2, ax2 = plt.subplots(figsize=(6, 5))
+        im = ax2.imshow(cm, cmap="Blues")
+        ax2.set_xticks(range(len(classes)))
+        ax2.set_yticks(range(len(classes)))
+        ax2.set_xticklabels(classes, rotation=45, ha="right")
+        ax2.set_yticklabels(classes)
+        ax2.set_xlabel("Material previsto")
+        ax2.set_ylabel("Material real")
+        ax2.set_title("Matriz de Confusão (validação cruzada)")
+        limite = cm.max() / 2 if cm.max() > 0 else 0
+        for i in range(len(classes)):
+            for j in range(len(classes)):
+                ax2.text(j, i, cm[i, j], ha="center", va="center",
+                         color="white" if cm[i, j] > limite else "black")
+        fig2.colorbar(im, ax=ax2)
+        plt.tight_layout()
+        st.pyplot(fig2)
+        plt.close()
+    else:
+        st.caption("Clique no botão acima para treinar e avaliar os modelos.")
