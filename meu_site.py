@@ -13,8 +13,8 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import StratifiedGroupKFold, cross_validate, cross_val_predict
-from sklearn.metrics import confusion_matrix
+from sklearn.model_selection import StratifiedGroupKFold, cross_val_predict
+from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
 
 # ============================================================
 # SISTEMA DE LOGIN — PROTEÇÃO DOS DADOS NÃO PUBLICADOS
@@ -443,7 +443,9 @@ if modo == "🔬 Visão Detalhada":
             t_eixo = np.arange(len(dados)) / fs * 1e6
 
             fig, axes = plt.subplots(2, 1, figsize=(6, 5))
+            fig.patch.set_facecolor("white")
 
+            # --- Sinal no tempo: mantém a unidade física (mV) ---
             axes[0].plot(t_eixo, dados, color="steelblue", linewidth=0.8)
             axes[0].axhline(threshold_mv, color="red", linestyle="--",
                             linewidth=0.8, label=f"Threshold ({threshold_mv} mV)")
@@ -453,7 +455,10 @@ if modo == "🔬 Visão Detalhada":
             axes[0].set_title(f"Sinal no Tempo — {label}")
             axes[0].legend(fontsize=7)
             axes[0].grid(True, alpha=0.3)
+            axes[0].set_facecolor("white")
+            axes[0].tick_params(labelsize=9)
 
+            # --- Espectro de frequências (FFT): magnitude não normalizada ---
             n = len(dados)
             freqs = fftfreq(n, d=1 / fs)
             espectro = np.abs(fft(dados))
@@ -462,9 +467,11 @@ if modo == "🔬 Visão Detalhada":
 
             axes[1].plot(freqs_pos, espectro_pos, color="darkorange", linewidth=0.8)
             axes[1].set_xlabel("Frequência (Hz)")
-            axes[1].set_ylabel("Amplitude (mV)")
+            axes[1].set_ylabel("Magnitude da FFT (u.a.)")
             axes[1].set_title("Espectro de Frequências (FFT)")
             axes[1].grid(True, alpha=0.3)
+            axes[1].set_facecolor("white")
+            axes[1].tick_params(labelsize=9)
 
             plt.tight_layout()
             st.pyplot(fig)
@@ -512,14 +519,29 @@ elif modo == "🆚 Comparação":
 
         st.markdown("### 📊 Gráficos Comparativos")
         for col_feat in df_comp.columns:
-            fig, ax = plt.subplots(figsize=(8, 3))
+            fig, ax = plt.subplots(figsize=(8, 4))
+            fig.patch.set_facecolor("white")
+            ax.set_facecolor("white")
+
             cores = plt.cm.tab10(np.linspace(0, 1, len(df_comp)))
             ax.bar(df_comp.index, df_comp[col_feat], color=cores, edgecolor="black")
+
             ax.set_title(f"{col_feat} — Média por Material")
+            # O nome da coluna já traz a unidade: mV (RMS e Pico) e mV²·s (Energia)
             ax.set_ylabel(col_feat)
             ax.set_xlabel("Material")
+
+            # Nomes dos materiais estavam sobrepostos: 30° alinhados à direita
+            ax.set_xticks(range(len(df_comp.index)))
+            ax.set_xticklabels(df_comp.index, rotation=30, ha="right", fontsize=9)
+
             ax.grid(True, axis="y", alpha=0.3)
-            plt.tight_layout()
+
+            # Energia: notação científica no eixo Y, sem casas decimais fixas
+            if col_feat == "Energia (mV²·s)":
+                ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+
+            fig.tight_layout()
             st.pyplot(fig)
             plt.close()
     else:
@@ -615,17 +637,13 @@ elif modo == "📚 Biblioteca de Sinais":
         )
 
         st.success(f"✅ {len(registros)} sinais carregados na biblioteca.")
-    else:
-        st.warning("Nenhum sinal encontrado na pasta de experimentos.")
 
 
 # ============================================================
-# MODO 4: MACHINE LEARNING (Prova de Conceito)
-# Classifica o MATERIAL a partir dos parâmetros de EA
-# Validação: StratifiedGroupKFold (sinais da mesma aquisição ficam juntos)
+# MODO 4: MACHINE LEARNING
 # ============================================================
 elif modo == "🤖 Machine Learning":
-    st.subheader("🤖 Machine Learning — Classificação de Materiais (PoC)")
+    st.subheader("🤖 Machine Learning — Classificação de Materiais (Prova de Conceito)")
     st.markdown(
         "Prova de conceito: os modelos tentam identificar o **material** de origem de cada sinal "
         "a partir dos parâmetros de EA extraídos. Validação cruzada **agrupada e estratificada**: "
@@ -711,16 +729,25 @@ elif modo == "🤖 Machine Learning":
                 st.warning(f"Divisão {k}: materiais ausentes no teste: {sorted(ausentes)}. "
                            "O F1 macro dessa divisão fica menos confiável.")
 
-        # --- Validação cruzada ---
+        # --- Validação única: cada modelo é validado UMA vez (predições out-of-fold).
+        #     A tabela de métricas e a matriz de confusão do Random Forest saem daqui. ---
         resultados = []
+        predicoes_cv = {}
         for nome, modelo in modelos.items():
-            sc = cross_validate(criar_pipe(modelo), X, y, cv=cv, groups=grupos,
-                                scoring=["accuracy", "f1_macro"])
+            y_pred_cv = cross_val_predict(criar_pipe(modelo), X, y, cv=cv, groups=grupos)
+            predicoes_cv[nome] = y_pred_cv
+
+            accs, f1s = [], []
+            for tr, te in cv.split(X, y, groups=grupos):
+                accs.append(accuracy_score(y.iloc[te], y_pred_cv[te]))
+                f1s.append(f1_score(y.iloc[te], y_pred_cv[te], average="macro"))
+
+            accs = np.array(accs)
             resultados.append({
                 "Modelo": nome,
-                "Acurácia Média": round(sc["test_accuracy"].mean(), 4),
-                "Desvio Padrão (±)": round(sc["test_accuracy"].std(), 4),
-                "F1-Score Macro": round(sc["test_f1_macro"].mean(), 4),
+                "Acurácia Média": round(accs.mean(), 4),
+                "Desvio Padrão (±)": round(accs.std(), 4),
+                "F1-Score Macro": round(np.mean(f1s), 4),
             })
 
         st.markdown("### 📋 Desempenho dos Modelos (validação cruzada agrupada)")
@@ -748,11 +775,8 @@ elif modo == "🤖 Machine Learning":
         st.pyplot(fig1)
         plt.close()
 
-        # --- Gráfico B: Matriz de confusão (predições out-of-fold, mesma validação agrupada) ---
-        y_pred = cross_val_predict(
-            criar_pipe(RandomForestClassifier(n_estimators=100, random_state=42)),
-            X, y, cv=cv, groups=grupos
-        )
+        # --- Gráfico B: Matriz de confusão (predições out-of-fold já calculadas acima) ---
+        y_pred = predicoes_cv["Random Forest"]
         classes = sorted(y.unique())
         cm = confusion_matrix(y, y_pred, labels=classes)
 
@@ -775,5 +799,14 @@ elif modo == "🤖 Machine Learning":
         plt.tight_layout()
         st.pyplot(fig2)
         plt.close()
+
+        df_cm = pd.DataFrame(cm, index=classes, columns=classes)
+        df_cm.index.name = "Real \\ Previsto"
+        st.download_button(
+            label="⬇️ Exportar matriz de confusão (CSV)",
+            data=df_cm.to_csv().encode("utf-8"),
+            file_name="matriz_confusao_random_forest.csv",
+            mime="text/csv",
+        )
     else:
         st.caption("Clique no botão acima para treinar e avaliar os modelos.")
